@@ -1,5 +1,77 @@
 # CLAUDE.md
 
+> ## ⚠️ This is hce-website — a fork of Sunrise. Read this first.
+>
+> This repository is **hce-website**, Human Centric Engineering's public-facing
+> website, built **on** the Sunrise platform (`human-centric-engineering/sunrise`),
+> forked at Sunrise **v0.7.0**. You are **building on Sunrise, not developing
+> Sunrise itself.**
+>
+> Everything below this banner is **Sunrise's own platform documentation**. Its
+> guidance about how the codebase works still applies — but the _maintainer_
+> workflows in it are **Sunrise's, not yours**: cutting Sunrise releases,
+> "CHANGELOG follows the public surface", the public-surface `/pre-pr` checks,
+> and `VERSIONING.md` all describe how the _platform_ is maintained upstream. In
+> hce-website you consume the platform; you don't version or release it.
+>
+> ### The golden rule: extend through the seams; don't edit platform-owned files.
+>
+> Every Sunrise-owned file you edit becomes a merge conflict the next time you
+> pull a Sunrise release. Prefer adding new files and using the designed seams.
+> Full playbook: [`CUSTOMIZATION.md`](./CUSTOMIZATION.md) and
+> [`.context/app/README.md`](./.context/app/README.md).
+>
+> **Two tiers: Sunrise → app.** hce-website is a **leaf-app fork** built directly
+> on Sunrise, so it lives entirely in the reserved **`/app`** tier. (The middle
+> **`/framework`** tier is for framework-layer forks like Daybreak — hce-website
+> does not use it.)
+>
+> **hce-website-owned (edit these freely):**
+>
+> - `lib/app/*` — the fork-owned scaffolds Sunrise ships empty
+>   (`env.ts`, `capabilities.ts`, `context-contributors.ts`, `bootstrap.ts`,
+>   `admin-nav.ts`, `public-nav.ts`, `protected-routes.ts`,
+>   `knowledge-access-contributors.ts`, `rate-limit.ts`, `db-drift.ts`, …).
+>   Register into Sunrise's seams **from here**, driven by `initApp()`.
+> - `prisma/schema/app.prisma` (your models) + `app_…` migrations touching only
+>   `app_*` tables
+> - **`.context/app/`** — hce-website's own documentation tree (Sunrise never
+>   creates it → never conflicts)
+> - `app/brand-theme.css`, and hce-website identity: `package.json`, `README.md`,
+>   `CUSTOMIZATION.md`, `.env*`, brand env (`NEXT_PUBLIC_APP_NAME`,
+>   `NEXT_PUBLIC_LEGAL_NAME`)
+> - New app files anywhere (marketing pages under `app/(public)`, API routes,
+>   `components/`)
+>
+> **Sunrise-owned (do NOT edit; extend through a seam instead):**
+>
+> - Core `lib/` utilities, core `app/api/v1` routes, core `components/`, the
+>   security / rate-limit middleware (`proxy.ts`, `lib/security/**`)
+> - `lib/sunrise-version.ts`, `VERSIONING.md`, `CHANGELOG.md`, and `.context/**`
+>   **except `.context/app/`**, plus the SQL of any **Sunrise** migration
+> - This `CLAUDE.md` **below the banner** — keep hce-website-specific instructions
+>   in this banner or in [`.context/app/README.md`](./.context/app/README.md), so
+>   upstream `CLAUDE.md` edits merge cleanly
+> - If you genuinely must change platform behaviour and no seam exists, keep the
+>   edit minimal and add a follow-up rather than rewriting Sunrise's file — a
+>   one-line "keep mine" is a cheap merge; a rewritten platform file is not
+>
+> ### Version model
+>
+> `package.json.version` is **hce-website's** app version (surfaced via
+> `lib/app-version.ts` → `/api/health` `version`). `lib/sunrise-version.ts` is
+> the **Sunrise platform** version you forked from — you merge it through on
+> upstream syncs; never edit it directly. hce-website's own changelog (when it
+> releases) is a separate `CHANGELOG.hce-website.md`, never Sunrise's
+> `CHANGELOG.md`.
+>
+> ### Pulling upstream Sunrise
+>
+> Sunrise is the `upstream` remote. To adopt a release:
+> `git fetch upstream --tags && git merge vX.Y.Z`. Resolve conflicts by keeping
+> your version and adding follow-ups; then run `npm run db:migrate:status` →
+> `db:migrate:dev` to apply newly-merged Sunrise migrations.
+
 Instructions for Claude Code when working in this repository.
 
 ## Project Overview
