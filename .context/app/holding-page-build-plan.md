@@ -42,11 +42,18 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
   script in the root layout, flipped via `@/hooks/use-theme`. The bespoke pill
   toggle calls the same hook → persistence + no-flash for free. Do NOT add
   `next-themes` or a second toggle mechanism.
-- **Theming.** Define the handoff's warm palette as theme-scoped CSS custom
-  properties (light default + `.dark`) in fork-owned CSS. Keep the page's tokens
-  self-contained (own `--bg`/`--fg`/`--accent`… names) rather than fighting the
-  shadcn `--color-*` tokens. `app/brand-theme.css` is the sanctioned fork-owned
-  CSS seam (cascades after globals).
+- **Theming = two layers.** (1) The palette IS the theme: `app/brand-theme.css`
+  maps Sunrise's shadcn `--color-*` tokens (`--color-background`, `--color-primary`,
+  …) onto the design tokens (`--bg`/`--accent`/…) under `[data-surface='consumer']`
+  (light) + `.dark`, so every platform component AND the light/dark toggle are
+  on-brand — not just the bespoke pieces. Design-only tokens with no shadcn peer
+  (`--accent2`, `--hero1/2`, the font stacks) stay custom. (2) `marketing.css`
+  layers bespoke design interest (fonts, first-light hairline, custom sections)
+  ON TOP of that theme. `app/brand-theme.css` is the sanctioned fork-owned CSS
+  seam (unlayered, so it beats Tailwind's `@theme` layer). **Gotcha:** unlayered
+  rules in `marketing.css` beat Tailwind's layered utilities — never set `display`
+  there on an element you also toggle with `dark:hidden` (it silently wins). Do
+  theme-swap visibility with a `.dark`-ancestor rule instead (see `.brand-logo`).
 - **Fonts.** Newsreader (display serif), Hanken Grotesk (body/UI), JetBrains Mono
   (labels) via `next/font/google`, applied through a wrapper className — avoids
   editing the platform `app/layout.tsx`.
@@ -71,20 +78,23 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 2 — Bespoke chrome
 
-- [ ] `SiteHeader` — themed wordmark (`height: 34px`, swap on theme) + pill theme
-      toggle (accent dot + mono `LIGHT`/`DARK` label) wired to `use-theme`.
-- [ ] `SiteFooter` — wordmark (`height: 24px`) + `© 2026 HCE Studio · hce.studio`
-      (mono) + legal cluster: Terms · Privacy · Cookie Preferences (the consent
-      button). Note: design's footer omits legal links; we add them per Simon.
-- [ ] Minimal `app/(public)/layout.tsx` swap → `SiteHeader`/`SiteFooter`,
-      full-bleed (drop the `container` constraint). Label the edit region.
+- [x] `SiteHeader` (+ `ThemePill`) — themed wordmark (34px, `.dark` CSS swap, no
+      flash) + pill toggle (accent dot + mono `LIGHT`/`DARK` label) wired to
+      `use-theme`. No auth/nav UI (this is where login gets hidden).
+- [x] `SiteFooter` — wordmark (24px) + `© {year} {legalName} · hce.studio` (mono) + legal cluster: Terms · Privacy · Cookie Preferences (consent button).
+- [x] Minimal `app/(public)/layout.tsx` swap → bespoke chrome, full-bleed,
+      `hce-site` + font-variable wrapper. Edit region marked `app:chrome`.
+- [x] Unit tests for `SiteHeader`/`SiteFooter`/`ThemePill` (toggle behaviour,
+      consent wiring, legal cluster, and the no-auth-UI guarantee).
+- [x] "First light" hairline folded into the shared chrome here (top of layout)
+      rather than Phase 3 — it's a site-wide chrome element. Sweep + reduced-motion
+      guard live in `marketing.css`.
 
 ### Phase 3 — Holding page
 
 - [ ] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
       all sections. Thin-shim `app/(public)/page.tsx` → this module.
-- [ ] First-light hairline: 3px sweep gradient, `7s linear infinite`, disabled
-      under `prefers-reduced-motion`.
+- [x] First-light hairline — done in Phase 2 (moved into shared chrome).
 - [ ] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
       (3 beliefs on `--soft` bg), "Let's build something." CTA + founder line.
 - [ ] Copy: British English, **no em dashes**. "Daybreak" (item 03's framework)

@@ -87,6 +87,33 @@
   --font-display-stack: var(--font-display), Georgia, 'Times New Roman', serif;
   --font-body-stack: var(--font-body), system-ui, -apple-system, sans-serif;
   --font-mono-stack: var(--font-mono-brand), ui-monospace, 'SFMono-Regular', monospace;
+
+  /* Map Sunrise's shadcn theme tokens onto the brand palette so the ACTUAL theme
+   * (and every platform component that reads `--color-*` — buttons, cards, the
+   * contact form) is on-brand, and the toggle moves between brand-light and
+   * brand-dark rather than Sunrise's default light/dark. Declared once here: each
+   * points at a design token above, so the `.dark` block below only needs to
+   * restate the design tokens and these inherit the dark values automatically.
+   * `--color-accent` is shadcn's SUBTLE hover surface (not our bold orange, which
+   * is `--color-primary`); `--color-destructive` intentionally keeps its default
+   * red for error states. */
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-card: var(--card);
+  --color-card-foreground: var(--fg);
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--fg);
+  --color-primary: var(--accent);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--soft);
+  --color-secondary-foreground: var(--fg);
+  --color-muted: var(--soft);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--soft);
+  --color-accent-foreground: var(--fg);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--accent);
 }
 
 [data-surface='consumer'].dark {
