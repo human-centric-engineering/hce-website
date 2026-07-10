@@ -1,0 +1,138 @@
+/* components/app/marketing/marketing.css
+ *
+ * Bespoke chrome + base styles for the hce.studio holding page (fork-owned).
+ * Consumed by app/(public)/layout.tsx. All colours/fonts come from the design
+ * tokens declared in app/brand-theme.css ([data-surface='consumer'] + .dark);
+ * this file only lays them out. Plain CSS (not Tailwind utilities) because the
+ * design is token-, clamp- and keyframe-heavy, which reads far better here than
+ * as long arbitrary-value class strings.
+ */
+
+/* Page shell — paints the warm surface and sets the body typeface. */
+.hce-site {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body-stack);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* "First light" hairline — a slow beam of dawn sweeping across the very top. */
+.first-light {
+  height: 3px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+  background-size: 60% 100%;
+  background-repeat: no-repeat;
+  animation: first-light-sweep 7s linear infinite;
+}
+@keyframes first-light-sweep {
+  0% {
+    background-position: -140% 0;
+  }
+  100% {
+    background-position: 240% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .first-light {
+    animation: none;
+    background-position: 50% 0;
+  }
+}
+
+/* Header */
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px clamp(24px, 6vw, 88px);
+  border-bottom: 1px solid var(--line);
+}
+.site-header__brand {
+  display: inline-flex;
+  align-items: center;
+}
+.brand-wordmark {
+  height: 34px;
+  width: auto;
+  display: block;
+}
+
+/* Theme toggle pill */
+.theme-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 15px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 150ms ease;
+}
+.theme-pill:hover {
+  border-color: var(--accent);
+}
+.theme-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+.theme-pill__label {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+
+/* Footer */
+.site-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 30px clamp(24px, 6vw, 88px);
+  border-top: 1px solid var(--line);
+}
+.site-footer__brand-mark {
+  height: 24px;
+  width: auto;
+  display: block;
+}
+.site-footer__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+}
+.site-footer__links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+}
+.site-footer__link {
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.site-footer__link:hover {
+  color: var(--fg);
+}
+.site-footer__copyright {
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}

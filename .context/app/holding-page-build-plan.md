@@ -71,20 +71,21 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 2 — Bespoke chrome
 
-- [ ] `SiteHeader` — themed wordmark (`height: 34px`, swap on theme) + pill theme
-      toggle (accent dot + mono `LIGHT`/`DARK` label) wired to `use-theme`.
-- [ ] `SiteFooter` — wordmark (`height: 24px`) + `© 2026 HCE Studio · hce.studio`
-      (mono) + legal cluster: Terms · Privacy · Cookie Preferences (the consent
-      button). Note: design's footer omits legal links; we add them per Simon.
-- [ ] Minimal `app/(public)/layout.tsx` swap → `SiteHeader`/`SiteFooter`,
-      full-bleed (drop the `container` constraint). Label the edit region.
+- [x] `SiteHeader` (+ `ThemePill`) — themed wordmark (34px, `.dark` CSS swap, no
+      flash) + pill toggle (accent dot + mono `LIGHT`/`DARK` label) wired to
+      `use-theme`. No auth/nav UI (this is where login gets hidden).
+- [x] `SiteFooter` — wordmark (24px) + `© {year} {legalName} · hce.studio` (mono) + legal cluster: Terms · Privacy · Cookie Preferences (consent button).
+- [x] Minimal `app/(public)/layout.tsx` swap → bespoke chrome, full-bleed,
+      `hce-site` + font-variable wrapper. Edit region marked `app:chrome`.
+- [x] "First light" hairline folded into the shared chrome here (top of layout)
+      rather than Phase 3 — it's a site-wide chrome element. Sweep + reduced-motion
+      guard live in `marketing.css`.
 
 ### Phase 3 — Holding page
 
 - [ ] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
       all sections. Thin-shim `app/(public)/page.tsx` → this module.
-- [ ] First-light hairline: 3px sweep gradient, `7s linear infinite`, disabled
-      under `prefers-reduced-motion`.
+- [x] First-light hairline — done in Phase 2 (moved into shared chrome).
 - [ ] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
       (3 beliefs on `--soft` bg), "Let's build something." CTA + founder line.
 - [ ] Copy: British English, **no em dashes**. "Daybreak" (item 03's framework)

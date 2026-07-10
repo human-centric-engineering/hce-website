@@ -1,9 +1,13 @@
 import type { Metadata } from 'next';
-import { AppHeader } from '@/components/layouts/app-header';
-import { PublicNav } from '@/components/layouts/public-nav';
-import { PublicFooter } from '@/components/layouts/public-footer';
+// app:chrome — hce-website renders bespoke holding-page chrome instead of the
+// platform AppHeader/PublicFooter. Keep this block on upstream merges ("keep
+// mine"); the swapped-in components live under components/app/marketing/.
 import { MaintenanceWrapper } from '@/components/maintenance-wrapper';
+import { SiteHeader } from '@/components/app/marketing/site-header';
+import { SiteFooter } from '@/components/app/marketing/site-footer';
+import { fontVariables } from '@/components/app/marketing/fonts';
 import { BRAND } from '@/lib/brand';
+import '@/components/app/marketing/marketing.css';
 
 export const metadata: Metadata = {
   title: {
@@ -30,10 +34,11 @@ export default function PublicLayout({
 }>) {
   return (
     <MaintenanceWrapper>
-      <div className="bg-background flex min-h-screen flex-col">
-        <AppHeader logoHref="/" navigation={<PublicNav />} />
+      <div className={`hce-site ${fontVariables} flex min-h-screen flex-col`}>
+        <div className="first-light" aria-hidden="true" />
+        <SiteHeader />
         <main className="flex-1">{children}</main>
-        <PublicFooter />
+        <SiteFooter />
       </div>
     </MaintenanceWrapper>
   );
