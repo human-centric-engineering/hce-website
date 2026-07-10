@@ -27,8 +27,14 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
   **unchanged**. Destination inbox is configured in `.env.local` (env, not code).
 - **Whitepaper:** PDF served at `public/downloads/hce-studio-whitepaper.pdf`
   (Simon provides the file). Add a `/whitepaper` route that **redirects** to it.
-- **Legal:** keep Sunrise's default `/privacy` and `/terms` copy. "Cookies" = the
-  existing always-rendered **Cookie Preferences** consent control.
+- **Legal:** `/terms` + `/privacy` repurposed from the group's ConQuest pages
+  (thin-shimmed to `components/app/marketing/{terms,privacy}-page.tsx`), adapted
+  to the website + contact-form scope (no accounts/questionnaires/user-facing AI),
+  England & Wales, entity **All Too Human Ltd** (co. 15336127) via `BRAND.legalName`.
+  "Cookies" = the always-rendered **Cookie Preferences** consent control.
+  _Pre-publish: confirm the legal@/privacy@ mailboxes exist, set the effective
+  date, and have a solicitor review._ (Supersedes the earlier "reuse Sunrise
+  defaults" decision.)
 - **Brand env:** `NEXT_PUBLIC_APP_NAME` and `NEXT_PUBLIC_LEGAL_NAME` are both
   already set in `.env.local`. The bespoke footer sets the visible copyright line
   directly regardless.
@@ -92,33 +98,37 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 3 — Holding page
 
-- [ ] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
+- [x] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
       all sections. Thin-shim `app/(public)/page.tsx` → this module.
 - [x] First-light hairline — done in Phase 2 (moved into shared chrome).
-- [ ] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
+- [x] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
       (3 beliefs on `--soft` bg), "Let's build something." CTA + founder line.
-- [ ] Copy: British English, **no em dashes**. "Daybreak" (item 03's framework)
-      **never named publicly** — describe by capability only. Partner venture
-      (Lelanea) referred to only as "a partner venture". Founder LinkedIn links.
+- [x] Copy: British English, **no em dashes** (curly apostrophes), Daybreak &
+      Lelanea verified absent from rendered output, founder LinkedIn links.
+      External links `target="_blank" rel="noopener noreferrer"`.
 
 ### Phase 4 — Contact page
 
-- [ ] Thin-shim `app/(public)/contact/page.tsx` → `contact-page.tsx`, re-skinned,
-      rendering the existing `<ContactForm>` (API untouched).
+- [x] Thin-shim `app/(public)/contact/page.tsx` → `contact-page.tsx`, re-skinned
+      on-brand, rendering the existing `<ContactForm>` (API untouched). Dropped
+      the Sunrise sidebar incl. the `mailto:` (verified absent from source).
 
 ### Phase 5 — Whitepaper
 
-- [ ] Place PDF at `public/downloads/hce-studio-whitepaper.pdf` (Simon provides).
-- [ ] `/whitepaper` route → redirect to the PDF. Wire the "Read the whitepaper ↗"
-      footer/section link.
+- [x] PDF in place at `public/downloads/hce-studio-whitepaper.pdf`;
+      `/whitepaper` 307s to it.
+- [x] `/whitepaper` route (`app/whitepaper/route.ts`) → 307 redirect to the PDF;
+      "Read the whitepaper ↗" link wired on the holding page.
 
 ### Phase 6 — Polish & validate
 
-- [ ] Metadata / OG / title / favicon; `robots.ts`, `sitemap.ts`.
-- [ ] Verify auth is fully unlinked (no login/signup/admin in chrome).
-- [ ] Light + dark visual pass; reduced-motion; responsive (grids collapse
-      3→2→1); `::selection` accent.
-- [ ] `npm run validate` (type-check + lint + format); `/pre-pr`.
+- [x] Metadata / OG on home + contact; on-brand `(public)` layout fallback
+      description; favicon (`app/icon.svg`, Phase 1). `robots.ts` already blocks
+      auth/admin; removed the orphaned Sunrise `/about` page + its sitemap entry.
+- [x] Auth fully unlinked — no login/signup/admin links in any marketing surface.
+- [x] Reduced-motion guard (first-light); responsive grids (`auto-fit` 3→2→1);
+      `::selection` accent. (Light/dark visual pass = Simon on localhost.)
+- [x] `npm run validate` green. `/pre-pr` + `/security-review` before the PR.
 
 ## Design tokens (from handoff README)
 
