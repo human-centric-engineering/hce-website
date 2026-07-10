@@ -28,7 +28,7 @@ export function SiteFooter() {
           width={117}
           height={24}
           unoptimized
-          className="site-footer__brand-mark block dark:hidden"
+          className="brand-logo brand-logo--footer brand-logo--light"
         />
         <Image
           src="/brand/wordmark-paper.svg"
@@ -36,7 +36,7 @@ export function SiteFooter() {
           width={117}
           height={24}
           unoptimized
-          className="site-footer__brand-mark hidden dark:block"
+          className="brand-logo brand-logo--footer brand-logo--dark"
         />
       </Link>
 

@@ -42,11 +42,18 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
   script in the root layout, flipped via `@/hooks/use-theme`. The bespoke pill
   toggle calls the same hook → persistence + no-flash for free. Do NOT add
   `next-themes` or a second toggle mechanism.
-- **Theming.** Define the handoff's warm palette as theme-scoped CSS custom
-  properties (light default + `.dark`) in fork-owned CSS. Keep the page's tokens
-  self-contained (own `--bg`/`--fg`/`--accent`… names) rather than fighting the
-  shadcn `--color-*` tokens. `app/brand-theme.css` is the sanctioned fork-owned
-  CSS seam (cascades after globals).
+- **Theming = two layers.** (1) The palette IS the theme: `app/brand-theme.css`
+  maps Sunrise's shadcn `--color-*` tokens (`--color-background`, `--color-primary`,
+  …) onto the design tokens (`--bg`/`--accent`/…) under `[data-surface='consumer']`
+  (light) + `.dark`, so every platform component AND the light/dark toggle are
+  on-brand — not just the bespoke pieces. Design-only tokens with no shadcn peer
+  (`--accent2`, `--hero1/2`, the font stacks) stay custom. (2) `marketing.css`
+  layers bespoke design interest (fonts, first-light hairline, custom sections)
+  ON TOP of that theme. `app/brand-theme.css` is the sanctioned fork-owned CSS
+  seam (unlayered, so it beats Tailwind's `@theme` layer). **Gotcha:** unlayered
+  rules in `marketing.css` beat Tailwind's layered utilities — never set `display`
+  there on an element you also toggle with `dark:hidden` (it silently wins). Do
+  theme-swap visibility with a `.dark`-ancestor rule instead (see `.brand-logo`).
 - **Fonts.** Newsreader (display serif), Hanken Grotesk (body/UI), JetBrains Mono
   (labels) via `next/font/google`, applied through a wrapper className — avoids
   editing the platform `app/layout.tsx`.

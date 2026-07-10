@@ -53,10 +53,29 @@
   display: inline-flex;
   align-items: center;
 }
-.brand-wordmark {
-  height: 34px;
+
+/* Themed wordmark: ink (charcoal) on light, paper (white) on dark. Toggled here
+ * via the `.dark` ancestor rather than Tailwind `dark:hidden` utilities — this
+ * file is unlayered, so a `display` rule here would otherwise beat (and defeat)
+ * Tailwind's layered `.hidden`, leaving BOTH variants visible. */
+.brand-logo {
   width: auto;
   display: block;
+}
+.brand-logo--header {
+  height: 34px;
+}
+.brand-logo--footer {
+  height: 24px;
+}
+.brand-logo--dark {
+  display: none;
+}
+.dark .brand-logo--dark {
+  display: block;
+}
+.dark .brand-logo--light {
+  display: none;
 }
 
 /* Theme toggle pill */
@@ -98,11 +117,6 @@
   gap: 18px;
   padding: 30px clamp(24px, 6vw, 88px);
   border-top: 1px solid var(--line);
-}
-.site-footer__brand-mark {
-  height: 24px;
-  width: auto;
-  display: block;
 }
 .site-footer__meta {
   display: flex;

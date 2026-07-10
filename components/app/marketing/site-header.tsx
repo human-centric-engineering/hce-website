@@ -22,7 +22,7 @@ export function SiteHeader() {
           height={34}
           priority
           unoptimized
-          className="brand-wordmark block dark:hidden"
+          className="brand-logo brand-logo--header brand-logo--light"
         />
         <Image
           src="/brand/wordmark-paper.svg"
@@ -31,7 +31,7 @@ export function SiteHeader() {
           height={34}
           priority
           unoptimized
-          className="brand-wordmark hidden dark:block"
+          className="brand-logo brand-logo--header brand-logo--dark"
         />
       </Link>
       <ThemePill />
