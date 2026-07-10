@@ -57,11 +57,15 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 1 — Foundations
 
-- [ ] Copy handoff SVGs into `public/` (wordmark-ink, wordmark-paper, mark-ink,
-      mark-paper). Favicon from the mark.
-- [ ] Add design palette tokens (light + `.dark`) as scoped CSS custom properties
-      in fork-owned CSS (see Design Tokens below).
-- [ ] Wire the three Google fonts via `next/font/google`.
+- [x] Brand SVGs copied to `public/brand/` (wordmark + mark, ink + paper).
+      Favicon = `app/icon.svg` (App Router convention, the HCE mark — no platform
+      layout edit).
+- [x] Design palette tokens added to `app/brand-theme.css` under
+      `[data-surface='consumer']` (light) + `[data-surface='consumer'].dark`
+      (dark), plus brand-orange `::selection`.
+- [x] Three Google fonts wired in `components/app/marketing/fonts.ts`
+      (`next/font/google`, CSS variables `--font-display`/`--font-body`/
+      `--font-mono-brand`). Consumed by the marketing layout in Phase 2.
 - [x] Brand env (`NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_LEGAL_NAME`) — already set
       in `.env.local`.
 
