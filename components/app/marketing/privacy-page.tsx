@@ -20,7 +20,7 @@ export const metadata: Metadata = {
 const COMPANY = {
   registeredAddress: '15 Hawkins Grove, Church Crookham, Fleet, GU51 5TX',
   companyNumber: '15336127',
-  privacyEmail: 'privacy@humancentricengineering.com',
+  privacyEmail: 'privacy@hce.studio',
 } as const;
 
 const LAST_UPDATED = '10 July 2026';

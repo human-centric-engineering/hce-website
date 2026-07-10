@@ -40,13 +40,9 @@ describe('PrivacyPage', () => {
       'href',
       'https://ico.org.uk'
     );
-    const emailLinks = screen.getAllByRole('link', {
-      name: /privacy@humancentricengineering\.com/,
-    });
+    const emailLinks = screen.getAllByRole('link', { name: /privacy@hce\.studio/ });
     expect(emailLinks.length).toBeGreaterThan(0);
-    emailLinks.forEach((link) =>
-      expect(link).toHaveAttribute('href', 'mailto:privacy@humancentricengineering.com')
-    );
+    emailLinks.forEach((link) => expect(link).toHaveAttribute('href', 'mailto:privacy@hce.studio'));
   });
 
   it('is scoped to the site + contact form, not the ConQuest product', async () => {

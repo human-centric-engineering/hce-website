@@ -37,9 +37,10 @@ describe('TermsPage', () => {
       'href',
       '/privacy'
     );
-    expect(
-      screen.getByRole('link', { name: /legal@humancentricengineering\.com/ })
-    ).toHaveAttribute('href', 'mailto:legal@humancentricengineering.com');
+    expect(screen.getByRole('link', { name: /legal@hce\.studio/ })).toHaveAttribute(
+      'href',
+      'mailto:legal@hce.studio'
+    );
   });
 
   it('does not carry over ConQuest SaaS content', async () => {
