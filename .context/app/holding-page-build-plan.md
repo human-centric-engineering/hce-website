@@ -103,22 +103,26 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 4 — Contact page
 
-- [ ] Thin-shim `app/(public)/contact/page.tsx` → `contact-page.tsx`, re-skinned,
-      rendering the existing `<ContactForm>` (API untouched).
+- [x] Thin-shim `app/(public)/contact/page.tsx` → `contact-page.tsx`, re-skinned
+      on-brand, rendering the existing `<ContactForm>` (API untouched). Dropped
+      the Sunrise sidebar incl. the `mailto:` (verified absent from source).
 
 ### Phase 5 — Whitepaper
 
-- [ ] Place PDF at `public/downloads/hce-studio-whitepaper.pdf` (Simon provides).
-- [ ] `/whitepaper` route → redirect to the PDF. Wire the "Read the whitepaper ↗"
-      footer/section link.
+- [ ] Place PDF at `public/downloads/hce-studio-whitepaper.pdf` (**Simon provides
+      — pending**; `/whitepaper` 307s there and 404s until the file lands).
+- [x] `/whitepaper` route (`app/whitepaper/route.ts`) → 307 redirect to the PDF;
+      "Read the whitepaper ↗" link wired on the holding page.
 
 ### Phase 6 — Polish & validate
 
-- [ ] Metadata / OG / title / favicon; `robots.ts`, `sitemap.ts`.
-- [ ] Verify auth is fully unlinked (no login/signup/admin in chrome).
-- [ ] Light + dark visual pass; reduced-motion; responsive (grids collapse
-      3→2→1); `::selection` accent.
-- [ ] `npm run validate` (type-check + lint + format); `/pre-pr`.
+- [x] Metadata / OG on home + contact; on-brand `(public)` layout fallback
+      description; favicon (`app/icon.svg`, Phase 1). `robots.ts` already blocks
+      auth/admin; removed the orphaned Sunrise `/about` page + its sitemap entry.
+- [x] Auth fully unlinked — no login/signup/admin links in any marketing surface.
+- [x] Reduced-motion guard (first-light); responsive grids (`auto-fit` 3→2→1);
+      `::selection` accent. (Light/dark visual pass = Simon on localhost.)
+- [x] `npm run validate` green. `/pre-pr` + `/security-review` before the PR.
 
 ## Design tokens (from handoff README)
 

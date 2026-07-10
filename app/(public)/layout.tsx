@@ -15,7 +15,7 @@ export const metadata: Metadata = {
     default: BRAND.name,
   },
   description:
-    'A production-ready Next.js starter template designed for rapid application development',
+    'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.',
 };
 
 /**
