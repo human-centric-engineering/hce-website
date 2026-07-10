@@ -473,3 +473,80 @@
   border: 1px solid var(--line);
   border-radius: 16px;
 }
+
+/* Legal pages (Terms, Privacy) — long-form, on-brand typography */
+.legal-page {
+  padding: clamp(56px, 9vw, 96px) clamp(24px, 6vw, 88px) clamp(64px, 10vw, 96px);
+}
+.legal-page__inner {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.legal-page__title {
+  font-family: var(--font-display-stack);
+  font-weight: 300;
+  font-size: clamp(34px, 5vw, 52px);
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  margin-top: 16px;
+  color: var(--fg);
+}
+.legal-page__updated {
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-top: 14px;
+}
+.legal-prose {
+  margin-top: 8px;
+}
+.legal-prose h2 {
+  font-family: var(--font-display-stack);
+  font-weight: 500;
+  font-size: clamp(22px, 2.6vw, 28px);
+  line-height: 1.25;
+  color: var(--fg);
+  margin-top: 44px;
+  margin-bottom: 4px;
+}
+.legal-prose h3 {
+  font-family: var(--font-body-stack);
+  font-weight: 600;
+  font-size: 17px;
+  color: var(--fg);
+  margin-top: 26px;
+  margin-bottom: 2px;
+}
+.legal-prose p {
+  font-family: var(--font-body-stack);
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--muted);
+  margin-top: 14px;
+}
+.legal-prose ul {
+  margin-top: 14px;
+  padding-left: 22px;
+  list-style: disc;
+}
+.legal-prose li {
+  font-family: var(--font-body-stack);
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.legal-prose strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+.legal-prose a {
+  color: var(--fg);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent);
+  transition: color 150ms ease;
+}
+.legal-prose a:hover {
+  color: var(--accent);
+}

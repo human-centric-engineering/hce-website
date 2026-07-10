@@ -27,8 +27,14 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
   **unchanged**. Destination inbox is configured in `.env.local` (env, not code).
 - **Whitepaper:** PDF served at `public/downloads/hce-studio-whitepaper.pdf`
   (Simon provides the file). Add a `/whitepaper` route that **redirects** to it.
-- **Legal:** keep Sunrise's default `/privacy` and `/terms` copy. "Cookies" = the
-  existing always-rendered **Cookie Preferences** consent control.
+- **Legal:** `/terms` + `/privacy` repurposed from the group's ConQuest pages
+  (thin-shimmed to `components/app/marketing/{terms,privacy}-page.tsx`), adapted
+  to the website + contact-form scope (no accounts/questionnaires/user-facing AI),
+  England & Wales, entity **All Too Human Ltd** (co. 15336127) via `BRAND.legalName`.
+  "Cookies" = the always-rendered **Cookie Preferences** consent control.
+  _Pre-publish: confirm the legal@/privacy@ mailboxes exist, set the effective
+  date, and have a solicitor review._ (Supersedes the earlier "reuse Sunrise
+  defaults" decision.)
 - **Brand env:** `NEXT_PUBLIC_APP_NAME` and `NEXT_PUBLIC_LEGAL_NAME` are both
   already set in `.env.local`. The bespoke footer sets the visible copyright line
   directly regardless.
