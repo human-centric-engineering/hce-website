@@ -109,8 +109,8 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 5 — Whitepaper
 
-- [ ] Place PDF at `public/downloads/hce-studio-whitepaper.pdf` (**Simon provides
-      — pending**; `/whitepaper` 307s there and 404s until the file lands).
+- [x] PDF in place at `public/downloads/hce-studio-whitepaper.pdf`;
+      `/whitepaper` 307s to it.
 - [x] `/whitepaper` route (`app/whitepaper/route.ts`) → 307 redirect to the PDF;
       "Read the whitepaper ↗" link wired on the holding page.
 
