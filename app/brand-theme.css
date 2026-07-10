@@ -56,3 +56,54 @@
  * See .context/ui/surface-theming.md for all six design constraints.
  * --------------------------------------------------------------------------
  */
+
+/* -------------------------------------------------------------------------
+ * hce.studio holding-page palette (fork-owned).
+ *
+ * The public marketing surface (everything non-/admin -> `consumer`) carries the
+ * design's warm dawn palette. These are the design's OWN token names
+ * (`--bg`/`--fg`/`--accent`...), read only by the bespoke marketing components, so
+ * they never touch Sunrise's shadcn `--color-*` tokens or the still-default auth /
+ * dashboard pages. Dark mode is the compound `.dark` scope: the theme toggle flips
+ * `.dark` on <html>, the same element that carries `data-surface`.
+ *
+ * The `--font-*-stack` tokens reference the `next/font` variables set by the
+ * marketing layout wrapper (components/app/marketing/fonts.ts); the nested `var()`
+ * resolves where that wrapper (and the fonts) are in scope, falling back to system
+ * generics elsewhere.
+ * ------------------------------------------------------------------------- */
+[data-surface='consumer'] {
+  --bg: #fbf6ef;
+  --fg: #26241f;
+  --muted: #6e675c;
+  --card: #ffffff;
+  --line: #e9e0d0;
+  --soft: #f3eadb;
+  --accent: #ed5a24;
+  --accent2: #f2a24c;
+  --hero1: #fff4e8;
+  --hero2: #fbdfc7;
+
+  --font-display-stack: var(--font-display), Georgia, 'Times New Roman', serif;
+  --font-body-stack: var(--font-body), system-ui, -apple-system, sans-serif;
+  --font-mono-stack: var(--font-mono-brand), ui-monospace, 'SFMono-Regular', monospace;
+}
+
+[data-surface='consumer'].dark {
+  --bg: #1a1714;
+  --fg: #f4eee4;
+  --muted: #a79d8c;
+  --card: #23201a;
+  --line: #35301f;
+  --soft: #201c16;
+  --accent: #ed5a24;
+  --accent2: #f4a85a;
+  --hero1: #2a1f16;
+  --hero2: #3a2519;
+}
+
+/* Brand-orange text selection on the marketing surface. */
+[data-surface='consumer'] ::selection {
+  background: #ed5a24;
+  color: #ffffff;
+}
