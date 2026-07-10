@@ -77,6 +77,8 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 - [x] `SiteFooter` — wordmark (24px) + `© {year} {legalName} · hce.studio` (mono) + legal cluster: Terms · Privacy · Cookie Preferences (consent button).
 - [x] Minimal `app/(public)/layout.tsx` swap → bespoke chrome, full-bleed,
       `hce-site` + font-variable wrapper. Edit region marked `app:chrome`.
+- [x] Unit tests for `SiteHeader`/`SiteFooter`/`ThemePill` (toggle behaviour,
+      consent wiring, legal cluster, and the no-auth-UI guarantee).
 - [x] "First light" hairline folded into the shared chrome here (top of layout)
       rather than Phase 3 — it's a site-wide chrome element. Sweep + reduced-motion
       guard live in `marketing.css`.
