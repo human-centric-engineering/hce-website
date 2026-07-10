@@ -92,14 +92,14 @@ believe → get in touch → footer**, light/dark toggle. Plus a re-skinned
 
 ### Phase 3 — Holding page
 
-- [ ] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
+- [x] `components/app/marketing/home-page.tsx` (default export + `metadata`) with
       all sections. Thin-shim `app/(public)/page.tsx` → this module.
 - [x] First-light hairline — done in Phase 2 (moved into shared chrome).
-- [ ] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
+- [x] Hero, "What we're doing now" (3 cards + frontier line), "What we believe"
       (3 beliefs on `--soft` bg), "Let's build something." CTA + founder line.
-- [ ] Copy: British English, **no em dashes**. "Daybreak" (item 03's framework)
-      **never named publicly** — describe by capability only. Partner venture
-      (Lelanea) referred to only as "a partner venture". Founder LinkedIn links.
+- [x] Copy: British English, **no em dashes** (curly apostrophes), Daybreak &
+      Lelanea verified absent from rendered output, founder LinkedIn links.
+      External links `target="_blank" rel="noopener noreferrer"`.
 
 ### Phase 4 — Contact page
 
