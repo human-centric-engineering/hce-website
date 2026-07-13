@@ -63,7 +63,7 @@
   display: block;
 }
 .brand-logo--header {
-  height: 34px;
+  height: 60px;
 }
 .brand-logo--footer {
   height: 24px;
@@ -207,6 +207,11 @@
 }
 .cta__arrow {
   color: var(--accent);
+}
+.cta svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
 /* Hero */

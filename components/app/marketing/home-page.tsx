@@ -63,6 +63,7 @@ export default function HomePage() {
               rel="noopener noreferrer"
               className="cta cta--secondary"
             >
+              <GitHubMark />
               Explore Sunrise{' '}
               <span className="cta__arrow" aria-hidden="true">
                 ↗
@@ -93,7 +94,7 @@ export default function HomePage() {
 
           <article className="card">
             <p className="card__index">02 / ConQuest</p>
-            <h2 className="card__title">Conversation, not forms</h2>
+            <h2 className="card__title">Conversations, not forms</h2>
             <p className="card__body">
               A conversational questionnaire platform. A natural dialogue in place of form-filling.
               An agent extracts, infers and synthesises answers, with confidence and provenance.
@@ -149,16 +150,24 @@ export default function HomePage() {
         </div>
         <div className="believe__grid">
           <div className="belief">
-            <p className="belief__index">01 / Human</p>
-            <p className="belief__statement">Software engineering is a deeply human endeavour.</p>
+            <p className="belief__index">01 / Change</p>
+            <p className="belief__statement">
+              Change is coming whether we like it or not. We choose to embrace it and steer it
+              somewhere better.
+            </p>
           </div>
           <div className="belief">
-            <p className="belief__index">02 / Symbiotic</p>
-            <p className="belief__statement">Humans and AI, working symbiotically.</p>
+            <p className="belief__index">02 / Symbiosis</p>
+            <p className="belief__statement">
+              Humans and AI, working together to create real value in a genuinely fulfilling way.
+            </p>
           </div>
           <div className="belief">
-            <p className="belief__index">03 / Craft</p>
-            <p className="belief__statement">Fast iteration, without giving up craft.</p>
+            <p className="belief__index">03 / A better way</p>
+            <p className="belief__statement">
+              There’s a better, more human way to build products and run businesses. We’re here to
+              prove it.
+            </p>
           </div>
         </div>
       </section>
