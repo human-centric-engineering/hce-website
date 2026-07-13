@@ -152,21 +152,19 @@ export default function HomePage() {
           <div className="belief">
             <p className="belief__index">01 / Change</p>
             <p className="belief__statement">
-              Change is coming whether we like it or not. We choose to embrace it and steer it
-              somewhere better.
+              Change is coming whether we like it or not and we can steer it if we embrace it.
             </p>
           </div>
           <div className="belief">
-            <p className="belief__index">02 / Symbiosis</p>
+            <p className="belief__index">02 / Creation</p>
             <p className="belief__statement">
-              Humans and AI, working together to create real value in a genuinely fulfilling way.
+              Humans can work with AI to create new forms of value in a genuinely fulfilling way.
             </p>
           </div>
           <div className="belief">
             <p className="belief__index">03 / A better way</p>
             <p className="belief__statement">
-              There’s a better, more human way to build products and run businesses. We’re here to
-              prove it.
+              There’s a better, more human way to build products and run businesses.
             </p>
           </div>
         </div>
