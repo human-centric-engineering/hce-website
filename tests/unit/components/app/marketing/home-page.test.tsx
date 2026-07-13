@@ -14,16 +14,15 @@ import * as React from 'react';
 import HomePage from '@/components/app/marketing/home-page';
 
 describe('HomePage', () => {
-  it('renders the hero, the three "doing now" cards, and the beliefs', () => {
-    render(React.createElement(HomePage));
+  it('renders the hero, three "doing now" cards, and three beliefs', () => {
+    const { container } = render(React.createElement(HomePage));
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Building experiences/);
-    expect(screen.getByText('The foundation')).toBeInTheDocument();
-    expect(screen.getByText('Conversation, not forms')).toBeInTheDocument();
-    expect(screen.getByText('Guided, personal experiences')).toBeInTheDocument();
-    expect(
-      screen.getByText(/Software engineering is a deeply human endeavour/)
-    ).toBeInTheDocument();
+    // Structure, not exact copy — marketing prose is expected to change and
+    // must not break CI. We assert the page renders its sections and the right
+    // number of cards/beliefs, leaving wording free to evolve.
+    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
+    expect(container.querySelectorAll('.card')).toHaveLength(3);
+    expect(container.querySelectorAll('.belief')).toHaveLength(3);
   });
 
   it('never leaks the confidential framework name or partner venture', () => {

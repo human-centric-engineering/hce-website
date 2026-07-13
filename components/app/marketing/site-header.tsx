@@ -18,8 +18,8 @@ export function SiteHeader() {
         <Image
           src="/brand/wordmark-ink.svg"
           alt={BRAND.name}
-          width={165}
-          height={34}
+          width={291}
+          height={60}
           priority
           unoptimized
           className="brand-logo brand-logo--header brand-logo--light"
@@ -27,8 +27,8 @@ export function SiteHeader() {
         <Image
           src="/brand/wordmark-paper.svg"
           alt={BRAND.name}
-          width={165}
-          height={34}
+          width={291}
+          height={60}
           priority
           unoptimized
           className="brand-logo brand-logo--header brand-logo--dark"
