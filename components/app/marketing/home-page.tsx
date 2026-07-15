@@ -158,7 +158,7 @@ export default function HomePage() {
           <div className="belief">
             <p className="belief__index">02 / Opportunity</p>
             <p className="belief__statement">
-              Humanity can leverage AI to create better experiences and new value.
+              Humanity can leverage AI to create better experiences and provide new value.
             </p>
           </div>
           <div className="belief">
