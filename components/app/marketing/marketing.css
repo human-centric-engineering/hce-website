@@ -8,8 +8,20 @@
  * as long arbitrary-value class strings.
  */
 
-/* Page shell — paints the warm surface and sets the body typeface. */
+/* Page shell — paints the warm surface and sets the body typeface.
+ *
+ * The `--font-*-stack` tokens MUST be declared here, on the same element the
+ * next/font `.variable` classes are applied to (this wrapper), not up on
+ * `[data-surface='consumer']` at <html>. CSS substitutes a token's inner
+ * `var()` against the element where the TOKEN is declared, not where it's used:
+ * declared at <html>, `var(--font-display)` sees no `--font-display` (it lives
+ * on this wrapper), so the whole token computes to guaranteed-invalid and the
+ * fonts never apply. Declared here, the inner var() resolves to the real face. */
 .hce-site {
+  --font-display-stack: var(--font-display), Georgia, 'Times New Roman', serif;
+  --font-body-stack: var(--font-body), system-ui, -apple-system, sans-serif;
+  --font-mono-stack: var(--font-mono-brand), ui-monospace, 'SFMono-Regular', monospace;
+
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-body-stack);

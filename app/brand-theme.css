@@ -67,10 +67,12 @@
  * dashboard pages. Dark mode is the compound `.dark` scope: the theme toggle flips
  * `.dark` on <html>, the same element that carries `data-surface`.
  *
- * The `--font-*-stack` tokens reference the `next/font` variables set by the
- * marketing layout wrapper (components/app/marketing/fonts.ts); the nested `var()`
- * resolves where that wrapper (and the fonts) are in scope, falling back to system
- * generics elsewhere.
+ * The `--font-*-stack` tokens are NOT declared here. They reference the
+ * `next/font` variables (`--font-display`...), which are scoped to the marketing
+ * `.hce-site` wrapper, not <html>. CSS substitutes a token's inner `var()`
+ * against the element where the token is DECLARED — declared at <html> here, the
+ * inner `var(--font-display)` would see nothing and compute to invalid. So the
+ * stacks live on `.hce-site` alongside the fonts (see marketing.css).
  * ------------------------------------------------------------------------- */
 [data-surface='consumer'] {
   --bg: #fbf6ef;
@@ -83,10 +85,6 @@
   --accent2: #f2a24c;
   --hero1: #fff4e8;
   --hero2: #fbdfc7;
-
-  --font-display-stack: var(--font-display), Georgia, 'Times New Roman', serif;
-  --font-body-stack: var(--font-body), system-ui, -apple-system, sans-serif;
-  --font-mono-stack: var(--font-mono-brand), ui-monospace, 'SFMono-Regular', monospace;
 
   /* Map Sunrise's shadcn theme tokens onto the brand palette so the ACTUAL theme
    * (and every platform component that reads `--color-*` — buttons, cards, the
