@@ -5,7 +5,7 @@ Human Centric Engineering's public-facing website, built on the Sunrise platform
 > ### 🍴 A fork of Sunrise
 >
 > hce-website is a **leaf-app fork** of the [Sunrise](https://github.com/human-centric-engineering/sunrise)
-> platform, forked at Sunrise **v0.7.0**. It builds on Sunrise through the
+> platform, currently synced to Sunrise **v0.8.0**. It builds on Sunrise through the
 > designed extension seams (the `/app` tier) and pulls Sunrise releases via the
 > `upstream` remote — it does **not** modify platform-owned files. The rest of
 > this README is Sunrise's platform documentation; hce-website's own docs live in
@@ -100,7 +100,13 @@ npm run db:migrate:dev
 npm run dev
 ```
 
-Open http://localhost:3000 to see the app.
+Open http://localhost:3010 to see the app — the port is set by `PORT` in the
+committed `.env.development`, which `npm run dev` reads.
+
+Running more than one Sunrise app on the same machine? Give each one its own
+`PORT` in its `.env.development` and `npm run dev` binds it, with no `-p` flag
+to remember. Forks should change the value rather than inherit 3010. See
+[`PORT`](./.context/environment/services-env.md#port).
 
 ### Using Docker
 
@@ -112,7 +118,7 @@ docker-compose exec web npx prisma migrate dev       # Run migrations (first tim
 ### First admin account
 
 Sunrise ships **no default login credentials**. On a fresh database, the first
-account you create — sign up at [`/signup`](http://localhost:3000/signup) — is
+account you create — sign up at [`/signup`](http://localhost:3010/signup) — is
 automatically promoted to `ADMIN`. Every account created after that is a regular
 `USER`.
 
