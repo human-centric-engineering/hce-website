@@ -129,7 +129,8 @@
   },
   "overrides": {
     "hono": "^4.11.7",
-    "valibot": "^1.2.0"
+    "valibot": "^1.2.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.6",
