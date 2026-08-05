@@ -13,7 +13,8 @@ merge.
 
 - **Independent repo, shared history.** hce-website is its own repository
   (`human-centric-engineering/hce-website`) that shares Sunrise's full git history.
-  It was forked at Sunrise **v0.7.0** (`b86d9d35`).
+  It was forked at Sunrise **v0.7.0** (`b86d9d35`) and is currently synced to
+  Sunrise **v0.8.0** (`45e704d9`).
 - **Remotes.** `origin` = hce-website, `upstream` = Sunrise. hce-website keeps its
   own tag namespace; Sunrise's tags are not pushed to `origin`.
 - **Two tiers: Sunrise → app.** hce-website lives entirely in the reserved
