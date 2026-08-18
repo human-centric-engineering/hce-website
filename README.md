@@ -5,7 +5,7 @@ Human Centric Engineering's public-facing website, built on the Sunrise platform
 > ### 🍴 A fork of Sunrise
 >
 > hce-website is a **leaf-app fork** of the [Sunrise](https://github.com/human-centric-engineering/sunrise)
-> platform, currently synced to Sunrise **v0.8.0**. It builds on Sunrise through the
+> platform, currently synced to Sunrise **v0.9.0**. It builds on Sunrise through the
 > designed extension seams (the `/app` tier) and pulls Sunrise releases via the
 > `upstream` remote — it does **not** modify platform-owned files. The rest of
 > this README is Sunrise's platform documentation; hce-website's own docs live in
