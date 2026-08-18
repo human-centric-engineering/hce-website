@@ -5,7 +5,7 @@ Human Centric Engineering's public-facing website, built on the Sunrise platform
 > ### 🍴 A fork of Sunrise
 >
 > hce-website is a **leaf-app fork** of the [Sunrise](https://github.com/human-centric-engineering/sunrise)
-> platform, currently synced to Sunrise **v0.8.0**. It builds on Sunrise through the
+> platform, currently synced to Sunrise **v0.9.0**. It builds on Sunrise through the
 > designed extension seams (the `/app` tier) and pulls Sunrise releases via the
 > `upstream` remote — it does **not** modify platform-owned files. The rest of
 > this README is Sunrise's platform documentation; hce-website's own docs live in
@@ -70,7 +70,7 @@ Docs:
 
 ### Prerequisites
 
-- Node.js 20.19+ (or 22.12+, 24+)
+- Node.js 24+ (see `.nvmrc`)
 - PostgreSQL 15+ (local, Docker, or hosted)
 
 ### Setup
@@ -131,7 +131,7 @@ automatically promoted to `ADMIN`. Every account created after that is a regular
 
 ```bash
 npm run dev              # Start dev server
-npm run validate         # Type-check + lint + format + tests
+npm run validate         # CHANGELOG + Node version + type-check + lint + format (Prettier + Prisma)
 npm run db:studio        # Open Prisma Studio
 npm test                 # Run tests
 ```
