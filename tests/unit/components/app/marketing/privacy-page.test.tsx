@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * PrivacyPage — hce.studio website privacy policy (adapted from ConQuest's).
  *

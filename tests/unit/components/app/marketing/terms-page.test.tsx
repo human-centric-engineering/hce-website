@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * TermsPage — hce.studio website terms (adapted from the group's ConQuest terms).
  *

@@ -82,6 +82,37 @@ npm ci
 npm run db:migrate:status  # then db:migrate:dev to apply newly-merged Sunrise migrations
 ```
 
+### Platform files hce-website deliberately keeps its own version of
+
+Four Sunrise-owned files carry a local edit. Each is marked in-file with an
+`app:` comment saying what to do on merge, so a conflict here is a one-line
+"keep mine" rather than a re-derivation. Listed so a future merge does not have
+to rediscover the reasoning:
+
+| File                                     | Marker                                       | Why                                                                                                                                                                                                       |
+| ---------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app/(public)/page.tsx`                  | `app:shim`                                   | Re-exports `components/app/marketing/home-page`. Same for `contact/`, `privacy/`, `terms/`.                                                                                                               |
+| `app/(public)/layout.tsx`                | `app:chrome`, `app:description`              | Bespoke holding-page chrome instead of `AppHeader`/`PublicFooter`; a literal meta description instead of `BRAND.description`, so the snippet is right without a deploy-host env var.                      |
+| `tests/unit/reserved-fork-tiers.test.ts` | `app:occupied-tiers`                         | Drops `components/app` and `.context/app` from the assert-empty rows — hce-website _is_ the fork those tiers are reserved for, so the rows can only fail here. The `/framework` rows stay live.           |
+| `tests/unit/app/layout-metadata.test.ts` | `app:module-list`, `app:intentional-sunrise` | The module list drops the deleted `/about` and gains contact/privacy/terms; the brand-leak row exempts `(public)/layout` and `(public)/page`, whose metadata names Sunrise on purpose — HCE publishes it. |
+
+The last two are new in Sunrise 0.10.0 and are the "core test a fork cannot
+satisfy" shape that release set out to fix (#480 / #525 / #530 / #533). Both are
+worth an upstream issue asking for a fork-side opt-out; until then the local
+edit stands.
+
+### The 0.10.0 test-environment change
+
+Vitest now runs on `node` by default, with a DOM opted into per file via a
+`// @vitest-environment happy-dom` directive on line 1. Upstream ships
+directives for its own test files and none for a fork's, so every hce-website
+component test failed on the first run after merging. `npm run fix:dom-tests`
+migrated all seven under `tests/unit/components/app/marketing/` — it decides by
+running each file, not by pattern-matching. Any _new_ component test needs the
+directive; add it when the test dies on `document is not defined`, and do not
+add it pre-emptively (over-declaring silently puts the file back on the client
+env schema). See [`../testing/environments.md`](../testing/environments.md).
+
 ## What this is
 
 The public marketing and content site for Human Centric Engineering — landing

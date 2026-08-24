@@ -14,6 +14,12 @@ export const metadata: Metadata = {
     template: `%s - ${BRAND.name}`,
     default: BRAND.name,
   },
+  // app:description — hce-website states its own meta description literally
+  // rather than reading BRAND.description (NEXT_PUBLIC_APP_DESCRIPTION), so the
+  // holding page's search-result snippet and link cards are correct in every
+  // environment without depending on a deploy-host env var. Keep this block on
+  // upstream merges ("keep mine"). Note Next resolves metadata at the nearest
+  // segment that declares a field, so this overrides the root layout outright.
   description:
     'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.',
 };

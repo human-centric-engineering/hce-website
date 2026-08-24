@@ -108,6 +108,23 @@ const serverEnvSchema = z.object({
         'silently run unscoped queries.'
     ),
 
+  // MCP session model (see .context/orchestration/mcp.md)
+  MCP_SESSION_MODE: z
+    .enum(['stateless', 'stateful'])
+    .default('stateless')
+    .describe(
+      'How the MCP server holds session state. "stateless" (default) holds none: every ' +
+        'request stands alone, no Mcp-Session-Id is issued, and the three methods that ' +
+        'need continuity (resources/subscribe, resources/unsubscribe, logging/setLevel) ' +
+        'refuse by name. This is the only mode that is correct where more than one ' +
+        'process serves traffic — on Vercel or any function-per-request platform the ' +
+        'handshake otherwise fails intermittently, because initialize lands on one ' +
+        "instance and the next request looks the id up in a sibling's empty map. " +
+        '"stateful" keeps an in-memory Map and is for a single long-running process ' +
+        'only; it is also a legacy-compatibility mode, since MCP revision 2026-07-28 ' +
+        'removes protocol-level sessions and the initialize handshake outright.'
+    ),
+
   // Capability authorization model (see lib/orchestration/capabilities/dispatcher.ts)
   CAPABILITY_BINDING_MODE: z
     .enum(['permissive', 'strict'])
@@ -226,6 +243,14 @@ const clientEnvSchema = z.object({
     .optional()
     .describe('Legal entity / copyright holder for the footer. Defaults to NEXT_PUBLIC_APP_NAME.'),
 
+  // Consumed via `lib/brand.ts` (`BRAND.description`), same client-safe pattern.
+  // Root <meta name="description"> for any page that does not set its own;
+  // defaults to the product name rather than a sentence (#519).
+  NEXT_PUBLIC_APP_DESCRIPTION: z
+    .string()
+    .optional()
+    .describe('Root meta description for search/social cards. Defaults to NEXT_PUBLIC_APP_NAME.'),
+
   // Analytics (optional - auto-detected based on available credentials)
   NEXT_PUBLIC_ANALYTICS_PROVIDER: z
     .enum(['ga4', 'posthog', 'plausible', 'console'])
@@ -312,6 +337,7 @@ const parsed = isBrowser
       NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
       NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
       NEXT_PUBLIC_LEGAL_NAME: process.env.NEXT_PUBLIC_LEGAL_NAME,
+      NEXT_PUBLIC_APP_DESCRIPTION: process.env.NEXT_PUBLIC_APP_DESCRIPTION,
       // Analytics (optional)
       NEXT_PUBLIC_ANALYTICS_PROVIDER: process.env.NEXT_PUBLIC_ANALYTICS_PROVIDER,
       NEXT_PUBLIC_GA4_MEASUREMENT_ID: process.env.NEXT_PUBLIC_GA4_MEASUREMENT_ID,
