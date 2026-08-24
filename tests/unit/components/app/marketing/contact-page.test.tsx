@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * ContactPage — branded shell around Sunrise's <ContactForm>.
  *

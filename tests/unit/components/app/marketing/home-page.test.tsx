@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * HomePage — the hce.studio holding page body.
  *

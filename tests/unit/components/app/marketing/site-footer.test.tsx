@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * SiteFooter — bespoke holding-page footer.
  *

@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * ThemePill — the holding page's theme toggle.
  *

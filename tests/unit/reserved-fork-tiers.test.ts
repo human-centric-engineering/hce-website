@@ -49,7 +49,25 @@ const UNMATERIALISED_RESERVATIONS = [
   '.context/app',
 ] as const;
 
-const EMPTY_RESERVATIONS = [...MATERIALISED_RESERVATIONS, ...UNMATERIALISED_RESERVATIONS] as const;
+// app:occupied-tiers — hce-website IS the fork these tiers are reserved FOR, so
+// `components/app` and `.context/app` legitimately hold its files and asserting
+// them empty here can only ever fail. Upstream still runs all five rows against
+// Sunrise itself, which is where the "core creates nothing here" promise is
+// actually enforced; a fork re-running it proves nothing about upstream.
+//
+// The two `/framework` rows and `components/framework` stay live on purpose:
+// hce-website is a leaf fork built directly on Sunrise and uses none of them, so
+// they still catch a platform file landing in a tier this repo has left empty.
+// The "exists in git so a fork can find it" case below is untouched.
+//
+// Keep this block on upstream merges ("keep mine"). Upstream follow-up: the test
+// needs a fork-side opt-out so this edit is not required — see
+// `.context/app/README.md`.
+const OCCUPIED_BY_THIS_FORK: readonly string[] = ['components/app', '.context/app'];
+
+const EMPTY_RESERVATIONS = [...MATERIALISED_RESERVATIONS, ...UNMATERIALISED_RESERVATIONS].filter(
+  (dir) => !OCCUPIED_BY_THIS_FORK.includes(dir)
+);
 
 const PLACEHOLDER_NAMES = new Set(['.gitkeep', '.gitignore', 'README.md']);
 

@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 /**
  * SiteHeader — bespoke holding-page header.
  *

@@ -36,15 +36,35 @@ const STUB_BRAND = 'Zzyzx Industries';
  * cannot import; the count assertion below is what stops the list going stale
  * silently.
  */
+// app:module-list — hce-website ships no /about page (deleted), and does ship
+// contact / privacy / terms, whose shims re-export metadata from
+// `components/app/marketing/*`. Swapping one row for three keeps the staleness
+// floor below intact at its upstream value and widens what is actually checked.
+// Keep this block on upstream merges ("keep mine").
 const METADATA_MODULES = [
   '@/app/layout',
   '@/app/(public)/layout',
   '@/app/(public)/page',
-  '@/app/(public)/about/page',
+  '@/app/(public)/contact/page',
+  '@/app/(public)/privacy/page',
+  '@/app/(public)/terms/page',
   '@/app/(protected)/layout',
   '@/app/(auth)/layout',
   '@/app/admin/layout',
 ] as const;
+
+/**
+ * app:intentional-sunrise — hce-website is Sunrise's author and says so in its
+ * marketing metadata ("…on Sunrise, our open-sourced, production-ready
+ * foundation with AI orchestration built in"). For THIS fork the word names the
+ * platform it publishes, not a starter identity it forgot to rewrite, so these
+ * two modules are exempt from the brand-leak row only.
+ *
+ * Everything else still runs against them, including the "does not advertise the
+ * starter template" row — which is the half that would catch a real #519-shaped
+ * leak here. Keep this block on upstream merges ("keep mine").
+ */
+const NAMES_SUNRISE_ON_PURPOSE = new Set<string>(['@/app/(public)/layout', '@/app/(public)/page']);
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -83,7 +103,9 @@ describe('metadata is driven by the BRAND seam, not hardcoded', () => {
       `${spec} exported no metadata strings — is the module list right?`
     ).toBeGreaterThan(0);
 
-    const leaks = strings.filter((s) => /\bSunrise\b/i.test(s));
+    const leaks = NAMES_SUNRISE_ON_PURPOSE.has(spec)
+      ? []
+      : strings.filter((s) => /\bSunrise\b/i.test(s));
     expect(
       leaks,
       `${spec} still says "Sunrise" with the brand stubbed to "${STUB_BRAND}", so the value is ` +
