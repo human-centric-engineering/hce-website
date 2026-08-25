@@ -16,6 +16,96 @@ release process.
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-08-25
+
+> **Alpha release.** Fifteenth tagged Sunrise release. **PATCH bump** — a
+> same-day hotfix. 0.11.0 shipped better-auth 1.7.1 without the column that
+> version requires, and took sign-in down for **every** user on **every**
+> provider: Google and email/password alike. Nothing about it was visible from
+> inside the codebase, and it passed a green test suite, a green CI run and a
+> successful deploy on its way out.
+>
+> ## What a fork has to do
+>
+> **Take this before anyone tries to log in.** If you are on 0.11.0, new
+> sign-ins are failing right now. Existing sessions are not — session validation
+> never reads `account` — so the damage is bounded to people logging in, which
+> is also why it can go unnoticed for a while.
+>
+> **Applying the migration is the whole upgrade** if you run stock Sunrise.
+> Deployments that run migrations for you (Vercel, the #583 Docker migrator)
+> need nothing further.
+>
+> **If you configured a social provider other than Google, read the fork note
+> below before you deploy** — the migration deliberately refuses to guess that
+> provider's issuer, and a refusal leaves a failed migration that blocks every
+> later deploy until it is cleared.
+>
+> **Your sync merge should also stop failing its own coverage gate** ([#671]).
+> That was Sunrise's debt being billed to you, and the floor now measures what
+> you wrote rather than what the merge carried in.
+
+### Fixed
+
+- **Sign-in was broken in 0.11.0 for every user — Google *and* email/password.**
+  0.11.0 bumped better-auth 1.6.29 → 1.7.1 ([#665]), which re-keyed account
+  identity from `(providerId, accountId)` to `(issuer, accountId)`, but the
+  `Account` model was never given the new `issuer` column. Every 1.7 sign-in
+  path selects it, so both flows failed closed against a 0.11.0 database: the
+  Google callback threw `Unknown argument 'issuer'` out of
+  `findAccountOwnerByKey`, and email/password sign-in failed on the same missing
+  column. Existing sessions were unaffected — session validation never reads
+  `account` — so the failure was confined to new sign-ins. Local `.test`
+  development did not catch it because `.test` domains cannot be used with
+  Google, and a stale `node_modules` was still serving 1.6.29.
+- **A fork's sync merge no longer fails `npm run test:changed:coverage` on
+  Sunrise's own coverage debt** ([#671]). The per-file 80% floor asks "is what
+  you changed tested" — but on a sync merge the fork changed nothing, so it was
+  demanding a fork either fail its own pre-PR gate or write tests for platform
+  files `CUSTOMIZATION.md` asks it not to diverge on. Measured against 0.11.0:
+  6 such files syncing from v0.9.0, ~15 from v0.7.0, ~16 from v0.5.0. The floor
+  now lands on what the branch **authored** (its own first-parent, non-merge
+  commits, plus staged and working-tree files); test *selection* still uses the
+  whole diff, so a merge that breaks upstream's tests still fails. An ordinary
+  feature branch has no merges and is gated exactly as before, and the run
+  prints `not authored here N` rather than narrowing in silence.
+- `scripts/ci/check-client-env-delivery.ts` had no test — the one exception to
+  `scripts/ci/`'s 24-of-24 convention, and it shipped in the same release as the
+  check that flags exactly this shape. Now covered at the wiring level.
+- `scripts/db/**` joins `scripts/smoke/**` in the coverage `exclude`. Both are
+  CLI entrypoints that talk to a live database; nothing imports them, so they
+  are absent from a full coverage run entirely and surface at 0% only when a
+  scoped run forces them in. `*-assertions.ts` stays gated in both trees.
+
+### Added
+
+- `Account.issuer` (`String`, required) with `@@unique([issuer, accountId])`,
+  matching better-auth ≥ 1.7. `issuer` is the authority that vouched for the
+  subject — `local:credential` for email/password, the verified OIDC issuer
+  (`https://accounts.google.com`) for Google, `local:oauth:<encoded providerId>`
+  for an OAuth2 provider with none of its own. `providerId` remains a column but
+  is local configuration and is **no longer an identity key**. Migration
+  `20260825120000_add_account_issuer` backfills existing rows.
+- `CREDENTIAL_ACCOUNT_ISSUER` in `lib/auth/constants.ts` — the issuer any code
+  writing a credential `Account` outside better-auth must set.
+
+> **Fork action.** Applying the migration is enough if you run stock Sunrise
+> (Google and/or email/password). **If you configured any other social provider,
+> extend `20260825120000_add_account_issuer` before deploying** — it raises on a
+> `providerId` whose issuer it does not know rather than guessing one, because a
+> wrong issuer does not fail loudly, it just strands those users at the login
+> screen. It also raises if two rows would collide on `(issuer, accountId)`.
+> Either abort leaves the migration recorded as failed, so every later deploy
+> stops with P3009 until you clear it with
+> `prisma migrate resolve --rolled-back 20260825120000_add_account_issuer` (on
+> Neon, prefix `PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK=true`) — worth knowing if
+> your platform runs migrations as part of the deploy. Adding a provider *after*
+> the migration has run needs no change at all; never edit an applied migration.
+> See [`.context/auth/oauth.md`](./.context/auth/oauth.md#account-identity-issuer-accountid).
+
+[#665]: https://github.com/human-centric-engineering/sunrise/issues/665
+[#671]: https://github.com/human-centric-engineering/sunrise/issues/671
+
 ## [0.11.0] — 2026-08-25
 
 > **Alpha release.** Fourteenth tagged Sunrise release. **MINOR bump** — the
@@ -4324,7 +4414,8 @@ Sunrise safe to fork and to merge upstream releases into.
 
 ---
 
-[Unreleased]: https://github.com/human-centric-engineering/sunrise/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/human-centric-engineering/sunrise/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/human-centric-engineering/sunrise/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.8.1...v0.9.0
