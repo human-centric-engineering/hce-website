@@ -14,6 +14,18 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import * as React from 'react';
 
+// hce-website's brand, for this file only. tests/setup.ts pins `@/lib/app/brand`
+// to null across the whole suite (#661) so that no CORE test reads a fork's brand
+// and fails for something the fork cannot fix. A test that needs a brand VALUE
+// overrides that with its own hoisted `vi.mock` — the sanctioned escape. Never
+// `vi.unmock`/`vi.doUnmock`: those REMOVE the pin rather than restoring it, and
+// tests/unit/lib/app/defaults.test.ts fails any file that does.
+vi.mock('@/lib/app/brand', () => ({
+  appBrandName: 'HCE Studio',
+  appBrandLegalName: 'All Too Human Ltd',
+  appBrandDescription: null,
+}));
+
 afterEach(() => {
   vi.resetModules();
   vi.unstubAllEnvs();
@@ -21,8 +33,6 @@ afterEach(() => {
 
 async function renderPrivacy() {
   vi.resetModules();
-  vi.stubEnv('NEXT_PUBLIC_APP_NAME', 'HCE Studio');
-  vi.stubEnv('NEXT_PUBLIC_LEGAL_NAME', 'All Too Human Ltd');
   const { default: PrivacyPage } = await import('@/components/app/marketing/privacy-page');
   return render(React.createElement(PrivacyPage));
 }

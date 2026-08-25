@@ -16,6 +16,199 @@ release process.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-25
+
+> **Alpha release.** Fourteenth tagged Sunrise release. **MINOR bump** — the
+> fork-friction release. Every defect here was found by merging a real fork or by
+> building a real container image; none of them was visible from inside the
+> codebase, and several passed a green test suite while shipping.
+>
+> ## What a fork has to do
+>
+> **BREAKING: three env vars are removed.** `NEXT_PUBLIC_APP_NAME`,
+> `NEXT_PUBLIC_LEGAL_NAME` and `NEXT_PUBLIC_APP_DESCRIPTION` no longer do
+> anything. Move the values into `lib/app/brand.ts`. If you miss it, a boot
+> warning names each variable still set, so the migration announces itself rather
+> than quietly reverting your brand to "Sunrise".
+>
+> **Then pin what you filled**, as for any seam — `tests/unit/lib/app/defaults.test.ts`
+> asserts each one ships empty, so its `lib/app/brand.ts` row fails the moment you
+> set a value. Change the row rather than deleting it; see the FORK NOTE at the
+> top of that file.
+>
+> **If you have files under `/app` or `/framework`**, declare those tiers in
+> `lib/app/reserved-tiers.ts` and pin that row in `defaults.test.ts` too. That is
+> the fix for the two 0.10.0 tests four of the five known forks failed on merge —
+> including on the `/framework` rows, which the issue had assumed were safe
+> because a leaf fork does not use them, but Daybreak is the framework-layer fork
+> and fails exactly those.
+>
+> So: **two edits if you only rebrand, four if you also occupy a tier.** Measured
+> by doing it, not estimated. Nothing else in the release asks anything of a fork.
+>
+> **No migration.** Zero migrations and no `prisma/schema/` change since 0.10.0,
+> so the code side is a plain `git merge v0.11.0`.
+>
+> ## Read this if you deploy with Docker
+>
+> Two defects were invisible from inside the codebase and showed up only in a real
+> container build. Brand identity reached no build at all, so a fork with its legal
+> entity correctly configured still shipped `© <year> Sunrise` in both footers —
+> proved by building 0.10.0, where the configured name appears zero times and
+> "Sunrise" 74 times in the server bundle. And eight of nine `NEXT_PUBLIC_*`
+> variables had no delivery path, so **analytics and error reporting were off on
+> every self-hosted deploy regardless of configuration**, with no error, nothing
+> above `debug`, and nothing visible in CI. Both are fixed, and both are now
+> guarded so the class cannot return silently.
+
+### Added
+
+- **`lib/app/brand.ts` — brand identity as committed code** (issue [#661]). A
+  fork-owned scaffold exporting `appBrandName`, `appBrandLegalName` and
+  `appBrandDescription`, all `null` upstream, read by `lib/brand.ts`. Vanilla
+  Sunrise is byte-for-byte unchanged; a fork sets three values in one committed
+  file and every brand surface follows — page titles, both footers, the header
+  `<BrandMark>`, the root meta description, and every transactional email.
+
+  Note `appBrandDescription` reaches fewer surfaces than you might expect: every
+  shipped *page* and route-group layout declares its own `description`, so the
+  root fallback is what `app/not-found.tsx` and the root `error.tsx` /
+  `global-error.tsx` serve — the 404 and error pages — plus any page a fork adds
+  that declares none. Worth setting: those are precisely the pages nobody thinks
+  to check.
+
+- **`lib/app/reserved-tiers.ts` — a fork declares which reserved tiers it occupies**
+  (issue [#660]). Ships `[]` upstream, so `tests/unit/reserved-fork-tiers.test.ts`
+  runs all five rows against Sunrise itself exactly as before.
+
+  That test enforces "Sunrise core creates nothing under the `/app` and
+  `/framework` tiers" by asserting the directories are empty. Upstream that is the
+  promise being kept. In a fork the same directories are the space the fork was
+  *told* to fill, so the assertion is unsatisfiable and the failure message blames
+  core for files core never created. **Four of the five known forks fail it on
+  `git merge v0.10.0`** — and not only on the `/app` rows: Daybreak is a
+  framework-layer fork and fails the two `/framework` rows for the same reason, so
+  this was never a leaf-fork-only concern. `reserved-fork-tiers.test.ts` is in
+  `ALWAYS_RUN_TESTS`, so a fork's suite is red from the merge commit onward until
+  it edits a Sunrise-owned test file. (`layout-metadata.test.ts` is added to that
+  list by this release — on v0.10.0 it surfaces only in a full run, not in a
+  scoped pre-flight.)
+
+  Declaring subtracts only the tiers you occupy, so the rest keep guarding. The
+  test rejects a name that is not a reserved tier — a typo would otherwise read as
+  a working declaration while the row it was meant to silence still failed — and
+  fails if you declare a tier you have left empty, so the declaration is
+  self-cleaning rather than accumulating.
+
+- **`npm run check:client-env` — a delivery guard for client variables** (issue
+  [#662]), wired into `npm run validate`. Scans the source for
+  `process.env.NEXT_PUBLIC_*` and fails when one lacks an `ARG`/`ENV` pair in the
+  `Dockerfile` or a build arg in `docker-compose.prod.yml`.
+
+  It keys on **"is it `NEXT_PUBLIC_`"** rather than "is it required", which is what
+  the old hand-maintained list got wrong. The scan is also co-extensive with what
+  Next actually inlines: the compiler needs the static `process.env.NEXT_PUBLIC_X`
+  form, so anything the regex misses the compiler misses too and was never
+  delivered anyway. Bracket-access reads are reported separately, since a build arg
+  cannot help them.
+
+  Fork-tolerant by design: a missing `Dockerfile` or `docker-compose.prod.yml` is
+  skipped rather than failed, so a fork that deploys only to a dashboard platform
+  is not handed one more core check it cannot satisfy.
+
+### Changed
+
+- **`tests/unit/app/layout-metadata.test.ts` derives its module list instead of
+  hand-listing it** (issue [#660]). The list was seven literal module specs behind
+  a `length >= 7` staleness floor, and both halves were wrong. It was **already
+  incomplete upstream** — `(public)/contact`, `(public)/privacy` and
+  `(public)/terms` all export metadata and none were listed, so the floor guarded a
+  list that had never been complete. And it was **unfixable in a fork**: deleting
+  the placeholder About page, which `CUSTOMIZATION.md` §6 explicitly invites and
+  two forks have already done, produced an unresolvable import rather than an
+  assertion failure, after which removing the dead row broke the floor. Reading
+  `app/` off disk takes the modules actually checked from 7 to **76** — 87 route
+  modules are discovered, of which 76 export a static `metadata` object — and
+  retires the floor, since a derived list cannot go stale. The remaining 11
+  include four that use `generateMetadata`, which needs route params and a live
+  database; the hand-listed version did not cover those either, and the test says
+  so rather than counting them.
+
+  Two rows are now fork-aware. The brand-leak row skips a route module that
+  re-exports from a tier declared in `lib/app/reserved-tiers.ts` — metadata reached
+  through a fork's own tier is its copy, not a leak of ours — and it is
+  deliberately the only row exempted: the starter-template row runs everywhere,
+  because no fork means to advertise a starter template. Measuring the forks says
+  that split is right, since two of them are shipping exactly that text today from
+  an About page they never rewrote. The title-doubling row now respects Next's own
+  `title.absolute` semantics, which opt a page out of the parent template — a fork
+  that ships its own home page commonly uses it, and the row was unsatisfiable for
+  them.
+
+### Removed
+
+- **BREAKING: `NEXT_PUBLIC_APP_NAME`, `NEXT_PUBLIC_LEGAL_NAME` and
+  `NEXT_PUBLIC_APP_DESCRIPTION`** (issue [#661]). Setting them now does nothing;
+  brand identity comes from `lib/app/brand.ts`.
+
+  **To upgrade:** move the three values from your `.env` into `lib/app/brand.ts`
+  and delete the env vars. That is the whole migration.
+
+  These are removed rather than deprecated because they were never a working
+  mechanism with a gap in it. `NEXT_PUBLIC_*` is inlined by the compiler at build
+  time, `.dockerignore` excludes `.env` and `.env.*`, and the Dockerfile forwards
+  only the four build args whose absence *fails* the build — the brand vars are
+  optional, so their absence was silent. On a container build they delivered
+  nothing at all, and every affected fork was already shipping `© <year> Sunrise`
+  while believing itself configured. Keeping them as a fallback would have meant
+  documenting, in five files, an escape hatch that silently fails on the
+  deployment path most forks use.
+
+  A deploy-time-varying brand — a staging name distinct from production — is no
+  longer supported. That case was already broken everywhere except Vercel.
+
+### Fixed
+
+- **`NEXT_PUBLIC_*` variables now reach a container build** (issue [#662]). Eight
+  of the nine could not, so **analytics and error reporting were off on every
+  self-hosted deploy regardless of configuration** — no error, nothing above
+  `debug`, and nothing visible in CI.
+
+  `NEXT_PUBLIC_*` is inlined by the compiler during `next build`; setting one on a
+  built image does nothing, and `.dockerignore` excludes `.env` and `.env.*`, so a
+  build arg is the only channel. The Dockerfile's own comment stated the rule that
+  produced the gap — *"required for Next.js build and environment validation"*,
+  i.e. **forward what fails the build**. That is right for every variable except
+  the class whose absence fails *silently*: client vars are all optional, so
+  exactly one was forwarded, and only because it happened to also be required.
+  Server-side secrets were never affected — they are runtime reads that `env_file`
+  supplies, and they must not become build args.
+
+  The eight are now wired through `Dockerfile`, `docker-compose.prod.yml` and CI,
+  and `NEXT_PUBLIC_SENTRY_DSN` / `NEXT_PUBLIC_COOKIE_CONSENT_ENABLED` are
+  registered in `lib/env.ts`, having been read straight from `process.env` and
+  declared nowhere.
+
+- **Blank environment values are treated as unset.** Found by building the image
+  rather than by any test: a Dockerfile `ENV VAR=$VAR` whose `ARG` was not passed
+  materialises as the **empty string**, and Zod's `.optional()` accepts `undefined`
+  but rejects `''`. Wiring the client vars therefore broke `next build` outright
+  for anyone who had not set all nine — which is every fork — on `"Invalid URL"`
+  for the two `.url()` hosts. `lib/env.ts` now drops blank values before parsing.
+
+  **Scoped to `NEXT_PUBLIC_*` deliberately.** Blank-is-unset is right where Docker
+  gives no way to distinguish the two, and wrong everywhere else: applying it to
+  the whole environment would have turned `SIGNUP_MODE=""` — what a deploy
+  template produces from an unset source — from a boot refusal into a silent
+  `.default('open')`, so an invite-only deployment would have come up accepting
+  public signups. `TENANCY_MODE`, `MCP_SESSION_MODE` and `CAPABILITY_BINDING_MODE`
+  had the same exposure. Server vars still fail loudly on a blank.
+
+
+[#660]: https://github.com/human-centric-engineering/sunrise/issues/660
+[#662]: https://github.com/human-centric-engineering/sunrise/issues/662
+[#661]: https://github.com/human-centric-engineering/sunrise/issues/661
+
 ## [0.10.0] — 2026-08-24
 
 > **Alpha release.** Thirteenth tagged Sunrise release. **MINOR bump** — the
@@ -4131,7 +4324,8 @@ Sunrise safe to fork and to merge upstream releases into.
 
 ---
 
-[Unreleased]: https://github.com/human-centric-engineering/sunrise/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/human-centric-engineering/sunrise/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/human-centric-engineering/sunrise/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/human-centric-engineering/sunrise/compare/v0.8.0...v0.8.1

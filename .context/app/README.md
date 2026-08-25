@@ -82,36 +82,65 @@ npm ci
 npm run db:migrate:status  # then db:migrate:dev to apply newly-merged Sunrise migrations
 ```
 
-### Platform files hce-website deliberately keeps its own version of
+### Brand identity
 
-Four Sunrise-owned files carry a local edit. Each is marked in-file with an
-`app:` comment saying what to do on merge, so a conflict here is a one-line
-"keep mine" rather than a re-derivation. Listed so a future merge does not have
-to rediscover the reasoning:
+hce-website's brand lives in **`lib/app/brand.ts`** (Sunrise 0.11.0) as committed
+code — `appBrandName` "HCE Studio", `appBrandLegalName` "All Too Human Ltd",
+`appBrandDescription` the studio sentence. It feeds page titles, both footers'
+copyright line, the header `<BrandMark>`, the root meta description and every
+transactional email.
 
-| File                                     | Marker                                       | Why                                                                                                                                                                                                       |
-| ---------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app/(public)/page.tsx`                  | `app:shim`                                   | Re-exports `components/app/marketing/home-page`. Same for `contact/`, `privacy/`, `terms/`.                                                                                                               |
-| `app/(public)/layout.tsx`                | `app:chrome`, `app:description`              | Bespoke holding-page chrome instead of `AppHeader`/`PublicFooter`; a literal meta description instead of `BRAND.description`, so the snippet is right without a deploy-host env var.                      |
-| `tests/unit/reserved-fork-tiers.test.ts` | `app:occupied-tiers`                         | Drops `components/app` and `.context/app` from the assert-empty rows — hce-website _is_ the fork those tiers are reserved for, so the rows can only fail here. The `/framework` rows stay live.           |
-| `tests/unit/app/layout-metadata.test.ts` | `app:module-list`, `app:intentional-sunrise` | The module list drops the deleted `/about` and gains contact/privacy/terms; the brand-leak row exempts `(public)/layout` and `(public)/page`, whose metadata names Sunrise on purpose — HCE publishes it. |
+Do **not** reintroduce `NEXT_PUBLIC_APP_NAME` / `NEXT_PUBLIC_LEGAL_NAME` /
+`NEXT_PUBLIC_APP_DESCRIPTION`. They were removed in 0.11.0 because they were
+inlined at build time and reached no container build, so a fork with its brand
+correctly configured still shipped as "Sunrise" (sunrise#661). Setting them again
+does nothing but raise a boot warning.
 
-The last two are new in Sunrise 0.10.0 and are the "core test a fork cannot
-satisfy" shape that release set out to fix (#480 / #525 / #530 / #533). Both are
-worth an upstream issue asking for a fork-side opt-out; until then the local
-edit stands.
+### Reserved tiers
 
-### The 0.10.0 test-environment change
+hce-website occupies `components/app` and `.context/app`, declared in
+**`lib/app/reserved-tiers.ts`**. `tests/unit/reserved-fork-tiers.test.ts`
+subtracts what is declared before asserting the rest are empty, so the tiers this
+fork does _not_ use keep guarding. Add a tier here before putting files in it.
 
-Vitest now runs on `node` by default, with a DOM opted into per file via a
-`// @vitest-environment happy-dom` directive on line 1. Upstream ships
-directives for its own test files and none for a fork's, so every hce-website
-component test failed on the first run after merging. `npm run fix:dom-tests`
-migrated all seven under `tests/unit/components/app/marketing/` — it decides by
-running each file, not by pattern-matching. Any _new_ component test needs the
-directive; add it when the test dies on `document is not defined`, and do not
-add it pre-emptively (over-declaring silently puts the file back on the client
-env schema). See [`../testing/environments.md`](../testing/environments.md).
+### Platform files hce-website keeps its own version of
+
+Two Sunrise-owned files carry a local edit, each marked in-file with an `app:`
+comment saying what to do on merge:
+
+| File                      | Marker       | Why                                                                                                                                  |
+| ------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `app/(public)/page.tsx`   | `app:shim`   | Re-exports `components/app/marketing/home-page`. Same for `contact/`, `privacy/`, `terms/`.                                          |
+| `app/(public)/layout.tsx` | `app:chrome` | Bespoke holding-page chrome instead of `AppHeader`/`PublicFooter`; the swapped-in components live under `components/app/marketing/`. |
+
+Plus two **pinned rows** in `tests/unit/lib/app/defaults.test.ts` (`app:pin`),
+which asserts every `lib/app/*` seam ships empty. Filling a seam is expected to
+fail its row — pin the new value rather than deleting the row, or the seams you
+have _not_ filled lose their protection. hce-website pins `lib/app/brand.ts` and
+`lib/app/reserved-tiers.ts`; if you change a brand value, change it in both
+places.
+
+> Sunrise 0.10.0 also needed local edits to `tests/unit/reserved-fork-tiers.test.ts`
+> and `tests/unit/app/layout-metadata.test.ts`. **Both were reverted in the 0.11.0
+> merge** — upstream made those tests fork-aware (sunrise#660), so the fork now
+> declares its shape through the seams above instead of maintaining copies of two
+> platform tests.
+
+### Testing notes
+
+**DOM is opt-in.** Vitest runs on `node`; a component test needs
+`// @vitest-environment happy-dom` on line 1. Add it when a test dies on
+`document is not defined` — never pre-emptively, since over-declaring silently
+puts the file back on the client env schema. `npm run fix:dom-tests` migrates by
+running, not by pattern. See [`../testing/environments.md`](../testing/environments.md).
+
+**Brand is pinned to null suite-wide.** `tests/setup.ts` mocks `@/lib/app/brand`
+to null in every test file, so no core test reads a fork's brand. A test that
+needs a real brand value declares its own hoisted `vi.mock('@/lib/app/brand', …)`
+— the three under `tests/unit/components/app/marketing/` that assert the
+copyright and legal blocks do exactly this. Never `vi.unmock` / `vi.doUnmock` the
+seam: that removes the pin instead of restoring it, and `defaults.test.ts` fails
+any file that does.
 
 ## What this is
 
