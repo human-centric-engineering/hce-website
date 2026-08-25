@@ -26,9 +26,9 @@
  * @see lib/app/ · CUSTOMIZATION.md §4
  */
 
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { registerAppRateLimits } from '@/lib/app/rate-limit';
 import { initAppCapabilities } from '@/lib/app/capabilities';
 import { initAppContextContributors } from '@/lib/app/context-contributors';
@@ -49,6 +49,7 @@ import { APP_API_KEY_SCOPES } from '@/lib/app/api-key-scopes';
 import { listValidApiKeyScopes, CORE_API_KEY_SCOPES } from '@/lib/auth/api-key-scopes';
 import appEslintConfig from '@/lib/app/eslint.config.mjs';
 import { appFrameSrc } from '@/lib/app/csp';
+import { occupiedTiers } from '@/lib/app/reserved-tiers';
 import { initAppUserCreatedHooks } from '@/lib/app/user-created';
 import { collectAppSubjectData } from '@/lib/app/data-export';
 import {
@@ -93,6 +94,9 @@ interface SeamDefault {
  * Seam files deliberately absent from the table below, with the reason. The
  * drift guard at the bottom of this file allows exactly these two.
  */
+/** This file's own repo-relative path — the one place importActual is allowed. */
+const THIS_FILE = path.join('tests', 'unit', 'lib', 'app', 'defaults.test.ts');
+
 const UNASSERTED_SEAMS = new Set([
   // Asserted behaviourally instead — see tests/unit/lib/db/drift-probes.test.ts.
   'lib/app/db-drift.ts',
@@ -285,6 +289,35 @@ const SEAM_DEFAULTS: SeamDefault[] = [
     },
   },
   {
+    seam: 'lib/app/reserved-tiers.ts',
+    risk: 'a stray entry would switch OFF the guard that keeps a reserved tier empty — and it is upstream, where core is the only thing that could put a file there, that the guard is the promise rather than a formality',
+    // app:pin — hce-website fills this seam; per the FORK NOTE above the row is
+    // pinned to the fork's value rather than deleted, so the tiers NOT declared
+    // here keep their guard.
+    assert: () => expect(occupiedTiers).toEqual(['components/app', '.context/app']),
+  },
+  {
+    seam: 'lib/app/brand.ts',
+    risk: 'a stray value would rebrand every install — page titles, both footers’ copyright line, the root meta description and every transactional email — and the legal-entity field is a legal-attribution surface, not a cosmetic one',
+    // `importActual`, NOT a plain import: tests/setup.ts pins this seam to null
+    // for the whole suite so that no core test reads a fork's brand. Importing
+    // it normally here would therefore assert the MOCK ships null, which is true
+    // by construction and would keep passing in a fork that had filled the real
+    // file — turning the one row that tells a fork to pin its value into a row
+    // that can never fail.
+    assert: async () => {
+      // app:pin — hce-website fills this seam; pinned to the fork's values per
+      // the FORK NOTE above. These three strings are hce-website's brand of
+      // record: changing one here should mean changing it in lib/app/brand.ts.
+      const seam = await vi.importActual<typeof import('@/lib/app/brand')>('@/lib/app/brand');
+      expect(seam.appBrandName).toBe('HCE Studio');
+      expect(seam.appBrandLegalName).toBe('All Too Human Ltd');
+      expect(seam.appBrandDescription).toBe(
+        'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.'
+      );
+    },
+  },
+  {
     seam: 'lib/app/csp.ts',
     risk: 'a stray origin would widen the iframe policy on every install',
     // These values are spliced straight into a response header, so an
@@ -301,6 +334,65 @@ afterEach(() => {
 describe('lib/app/ seams ship empty', () => {
   it.each(SEAM_DEFAULTS)('$seam registers nothing by default', async ({ assert }) => {
     await assert();
+  });
+
+  it('nothing but this file escapes the suite-wide brand-seam pin', () => {
+    // tests/setup.ts mocks `@/lib/app/brand` to null for EVERY test file, so
+    // that no core test can read a fork's brand and fail for a reason the fork
+    // cannot fix (#660/#661). That guarantee holds across all ~1095 test files
+    // by construction, but only while nothing escapes the mock.
+    //
+    // `vi.importActual` is legitimate here and nowhere else: it is what makes
+    // the brand row above assert the REAL scaffold rather than the mock, which
+    // is what keeps "seams ship empty" able to fail in a fork.
+    //
+    // `vi.doUnmock` is never right. It REMOVES the pin instead of restoring it,
+    // so every later case in that file sees the real seam. That is not
+    // hypothetical: it shipped twice during this change — once in this suite's
+    // own brand tests (13 cases failed against a filled seam) and once in
+    // layout-metadata, where it was invisible only because every remaining case
+    // happened to re-stub first. To go back to the null default mid-file,
+    // re-`doMock` it; do not unmock it.
+    //
+    // Matched by REGEX over vitest's whole unmocking surface, not by two string
+    // literals. The literal version missed `vi.unmock` — a third escape route —
+    // and was also defeated by double quotes or a line-wrapped call. That is the
+    // enumerating-guard failure mode this repo keeps meeting: it fails one
+    // instance per round. vitest exposes exactly `unmock` and `doUnmock` for
+    // removing a mock, so anchoring on `(?:do)?unmock` is exhaustive over the API
+    // rather than over the spellings someone happened to think of.
+    const seamPath = String.raw`['"\`]@/lib/app/brand['"\`]`;
+    const unmockRe = new RegExp(String.raw`\bvi\s*\.\s*(?:do)?[Uu]nmock\s*\(\s*` + seamPath);
+    const actualRe = new RegExp(String.raw`importActual[\s\S]{0,80}?` + seamPath);
+
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry.name)) continue;
+        const src = readFileSync(full, 'utf8');
+        const rel = path.relative(process.cwd(), full);
+        if (unmockRe.test(src)) {
+          offenders.push(`${rel}: unmocks the pin instead of restoring it`);
+        }
+        if (actualRe.test(src) && rel !== THIS_FILE) {
+          offenders.push(`${rel}: reads the real seam past the pin`);
+        }
+      }
+    };
+    walk(path.join(process.cwd(), 'tests'));
+
+    expect(
+      offenders,
+      'These test files escape the brand-seam pin in tests/setup.ts. A fork that ' +
+        'fills lib/app/brand.ts would see its own brand here and fail a core test ' +
+        'it cannot fix — the exact class #660 is about. Re-doMock the null values ' +
+        'instead of unmocking, and leave importActual to this file.'
+    ).toEqual([]);
   });
 
   it('has a row for every seam file in lib/app/', () => {
