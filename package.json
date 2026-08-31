@@ -140,11 +140,11 @@
     "react-dom": "^19.2.8",
     "react-easy-crop": "^6.2.3",
     "react-email": "^6.9.2",
-    "react-hook-form": "^7.85.0",
+    "react-hook-form": "^7.86.0",
     "react-markdown": "^10.1.0",
     "recharts": "^3.10.1",
     "remark-gfm": "^4.0.1",
-    "resend": "^6.21.0",
+    "resend": "^6.22.0",
     "sharp": "^0.35.3",
     "tailwind-merge": "^3.6.0",
     "umap-js": "^1.4.0"
