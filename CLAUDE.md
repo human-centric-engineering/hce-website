@@ -71,6 +71,17 @@
 > `git fetch upstream --tags && git merge vX.Y.Z`. Resolve conflicts by keeping
 > your version and adding follow-ups; then run `npm run db:migrate:status` →
 > `db:migrate:dev` to apply newly-merged Sunrise migrations.
+>
+> ### This project on the HCE Hub
+>
+> **HCE Studio Website** · slug `hce-website` · project id
+> `cmu49acp9000004l7k2wowqly` · host platform: Sunrise (fork). Use **this**
+> identity for every Hub call. The "This project is coordinated through the
+> HCE Hub" section further down is Sunrise's own (slug `sunrise`) and does not
+> apply here; the process it points at (`hub://process/core`,
+> `hub://process/sunrise-platform`) does. Each Sunrise sync is a task on the
+> standing feature `f-sunrise-upstream`; post-launch holding-page work is a
+> `bug` or `enhancement` on `f-holding-page`.
 
 Instructions for Claude Code when working in this repository.
 
