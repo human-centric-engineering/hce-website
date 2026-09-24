@@ -28,6 +28,9 @@
 import { prisma } from '@/lib/db/client';
 import { eraseUser } from '@/lib/privacy/erase-user';
 import { PLATFORM_ADMIN_ROLE } from '@/lib/auth/roles';
+import { INSTALL_ORG_ID } from '@/lib/tenancy/constants';
+import { ORG_OWNER_ROLE } from '@/lib/tenancy/roles';
+import { runAsOrg } from '@/lib/tenancy/context';
 
 const PREFIX = 'smoke-test-erasure';
 const stamp = Date.now();
@@ -73,6 +76,13 @@ async function main(): Promise<void> {
       },
     });
     subjectUserId = subject.id;
+
+    // Org membership (§106): the person's data — cascades with them, and the
+    // org itself stands. `prisma.user.create` bypasses the auth hook that
+    // normally writes this, so it is created here explicitly.
+    const membership = await prisma.orgMembership.create({
+      data: { orgId: INSTALL_ORG_ID, userId: subject.id, role: ORG_OWNER_ROLE },
+    });
 
     // Org config (retained → createdBy SetNull) + personal data (cascade).
     const agent = await prisma.aiAgent.create({
@@ -226,6 +236,14 @@ async function main(): Promise<void> {
       (await prisma.aiMessage.findUnique({ where: { id: message.id } })) === null,
       'message cascade-deleted via its conversation'
     );
+    check(
+      (await prisma.orgMembership.findUnique({ where: { id: membership.id } })) === null,
+      'org membership cascade-deleted (personal data)'
+    );
+    check(
+      (await prisma.org.findUnique({ where: { id: INSTALL_ORG_ID } })) !== null,
+      'the install org survives erasing one of its OWNERs'
+    );
 
     // Org config retained, creator de-attributed.
     const agentAfter = await prisma.aiAgent.findUnique({ where: { id: agent.id } });
@@ -321,7 +339,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(async (err) => {
+// The install org is the org a smoke runs for: at `multi` a tenant-owned
+// read outside any scope refuses rather than reads wide (§107 t-708).
+runAsOrg(INSTALL_ORG_ID, main, { source: 'job' }).catch(async (err) => {
   console.error('\n✗ smoke:erasure failed:', err);
   try {
     await prisma.$disconnect();
