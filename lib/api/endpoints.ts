@@ -42,11 +42,31 @@ export const API = {
     METADATA: '/api/v1/invitations/metadata',
   },
 
+  /** Org endpoints (§106) */
+  ORGS: {
+    /** The caller's memberships */
+    LIST: '/api/v1/orgs',
+    /** Change the org the current session acts in */
+    SWITCH: '/api/v1/orgs/switch',
+    /** One org, as one of its members */
+    byId: (id: string): string => `/api/v1/orgs/${id}`,
+    /** An org's roster (OWNER/ADMIN of that org) */
+    members: (id: string): string => `/api/v1/orgs/${id}/members`,
+    /** One membership (OWNER/ADMIN of that org) */
+    member: (id: string, userId: string): string => `/api/v1/orgs/${id}/members/${userId}`,
+  },
+
   /** Admin endpoints */
   ADMIN: {
     STATS: '/api/v1/admin/stats',
     LOGS: '/api/v1/admin/logs',
     INVITATIONS: '/api/v1/admin/invitations',
+    /** Every org, the vendor's view */
+    ORGS: '/api/v1/admin/orgs',
+    /** One org (rename, suspend, delete) */
+    orgById: (id: string): string => `/api/v1/admin/orgs/${id}`,
+    /** An org's data export bundle */
+    orgExport: (id: string): string => `/api/v1/admin/orgs/${id}/export`,
     /** Delete invitation by email */
     invitationByEmail: (email: string): string =>
       `/api/v1/admin/invitations/${encodeURIComponent(email)}`,
@@ -310,8 +330,6 @@ export const API = {
       mcpKeyById: (id: string): string => `/api/v1/admin/orchestration/mcp/keys/${id}`,
       mcpKeyRotate: (id: string): string => `/api/v1/admin/orchestration/mcp/keys/${id}/rotate`,
       MCP_AUDIT: '/api/v1/admin/orchestration/mcp/audit',
-      MCP_SESSIONS: '/api/v1/admin/orchestration/mcp/sessions',
-      mcpSessionById: (id: string): string => `/api/v1/admin/orchestration/mcp/sessions/${id}`,
 
       /** Admin audit log */
       AUDIT_LOG: '/api/v1/admin/orchestration/audit-log',
