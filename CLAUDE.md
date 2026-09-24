@@ -4,7 +4,7 @@
 >
 > This repository is **hce-website**, Human Centric Engineering's public-facing
 > website, built **on** the Sunrise platform (`human-centric-engineering/sunrise`),
-> currently synced to Sunrise **v0.12.0**. You are **building on Sunrise, not
+> currently synced to Sunrise **v0.13.0**. You are **building on Sunrise, not
 > developing Sunrise itself.**
 >
 > Everything below this banner is **Sunrise's own platform documentation**. Its
