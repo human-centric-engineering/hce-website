@@ -4,7 +4,7 @@
 >
 > This repository is **hce-website**, Human Centric Engineering's public-facing
 > website, built **on** the Sunrise platform (`human-centric-engineering/sunrise`),
-> currently synced to Sunrise **v0.13.0**. You are **building on Sunrise, not
+> currently synced to Sunrise **v0.14.0**. You are **building on Sunrise, not
 > developing Sunrise itself.**
 >
 > Everything below this banner is **Sunrise's own platform documentation**. Its
@@ -475,6 +475,7 @@ All commands default to branch diff mode but accept file/folder paths. The test-
 | Cost Estimation          | `.context/orchestration/cost-estimation.md`               | Generic pre-run USD estimate service; empirical/heuristic modes; trigger-UI recipe                                                               |
 | Step Provenance          | `.context/orchestration/provenance.md`                    | `output.sources` contract, engine capture, approval/trace UI pills, opt-in guard rule                                                            |
 | Agent Field Registry     | `.context/orchestration/agent-fields.md`                  | Single source of truth for `AiAgent` config fields; how to add a field, derived vs parity-tested surfaces, fork seam                             |
+| Platform Agents          | `.context/orchestration/platform-agents.md`               | Sunrise's own agents as code definitions, one instance per org; who owns which field; the reconcile, its three callers and its fork seam         |
 | Patterns & Steps         | `.context/orchestration/patterns-and-steps.md`            | The 21 canonical patterns, step→pattern relationships, author guidance                                                                           |
 | Orchestration Engine     | `.context/orchestration/engine.md`                        | Runtime executor, registry, events, strategies                                                                                                   |
 | Tracing (OTEL plug-in)   | `.context/orchestration/tracing.md`                       | Tracer interface, no-op default, OTEL adapter, span tree, attributes                                                                             |

@@ -380,9 +380,11 @@ sync-safe.
 
 **Logo & favicon:**
 
-- Replace `public/favicon.ico`
+- Replace `app/favicon.ico` and `app/icon.svg` — Next links both from
+  `<head>` automatically, so no `app/layout.tsx` edit is needed. Keep the
+  names; don't put icons back in `public/` (a `public/favicon.ico` next to
+  `app/favicon.ico` is a dev-server error)
 - Add logo images to `public/`
-- Update `app/layout.tsx` → `metadata.icons`
 - Update the landing page hero via the thin-shim ([§6](#6-landing-page--routes)),
   not by editing `app/(public)/page.tsx` in place
 
@@ -469,6 +471,8 @@ small and conflict-free.)
 | `lib/app/brand.ts`                         | product name, legal entity, meta description                          | `lib/brand.ts` → metadata, footers, `<BrandMark>`, emails (server + client)                                           |
 | `lib/app/reserved-tiers.ts`                | which reserved tiers THIS checkout occupies                           | `tests/unit/reserved-fork-tiers.test.ts` + the metadata guard (test)                                                  |
 | `lib/app/authorization.ts`                 | who may administer, and over whose data                               | `withAuth` / `withAdminAuth` / the admin layout (server)                                                              |
+| `lib/app/platform-agents.ts`               | agents every org gets its own instance of (`initAppPlatformAgents`)   | the platform-agent registry → its reconcile (org creation, seed, maintenance tick)                                    |
+| `lib/app/provider-credentials.ts`          | where a provider's API key comes from (`initAppProviderCredentials`)  | the provider manager, every time a provider is fetched (server)                                                       |
 
 > **Filling a seam is expected to fail one row of a core test.**
 > `tests/unit/lib/app/defaults.test.ts` asserts every seam ships empty — that
