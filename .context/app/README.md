@@ -14,7 +14,7 @@ merge.
 - **Independent repo, shared history.** hce-website is its own repository
   (`human-centric-engineering/hce-website`) that shares Sunrise's full git history.
   It was forked at Sunrise **v0.7.0** (`b86d9d35`) and is currently synced to
-  Sunrise **v0.9.0** (`a4f789c2`).
+  Sunrise **v0.15.0** (`8b6b7c14`).
 - **Remotes.** `origin` = hce-website, `upstream` = Sunrise. hce-website keeps its
   own tag namespace; Sunrise's tags are not pushed to `origin`.
 - **Two tiers: Sunrise → app.** hce-website lives entirely in the reserved
@@ -81,6 +81,11 @@ git merge vX.Y.Z            # ordinary 3-way merge; keep-mine on any platform-fi
 npm ci
 npm run db:migrate:status  # then db:migrate:dev to apply newly-merged Sunrise migrations
 ```
+
+Then record the new version in the two places hce-website states it: the
+"currently synced to" line under [The fork model](#the-fork-model) above, and the
+`CLAUDE.md` banner. `lib/sunrise-version.ts` arrives through the merge; never
+edit it by hand.
 
 ### Brand identity
 
