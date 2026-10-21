@@ -4,7 +4,7 @@
 >
 > This repository is **hce-website**, Human Centric Engineering's public-facing
 > website, built **on** the Sunrise platform (`human-centric-engineering/sunrise`),
-> currently synced to Sunrise **v0.14.0**. You are **building on Sunrise, not
+> currently synced to Sunrise **v0.15.0**. You are **building on Sunrise, not
 > developing Sunrise itself.**
 >
 > Everything below this banner is **Sunrise's own platform documentation**. Its
@@ -76,11 +76,11 @@
 >
 > **HCE Studio Website** · slug `hce-website` · project id
 > `cmu49acp9000004l7k2wowqly` · host platform: Sunrise (fork). Use **this**
-> identity for every Hub call. The "This project is coordinated through the
-> HCE Hub" section further down is Sunrise's own (slug `sunrise`) and does not
-> apply here; the process it points at (`hub://process/core`,
-> `hub://process/sunrise-platform`) does. Each Sunrise sync is a task on the
-> standing feature `f-sunrise-upstream`; post-launch holding-page work is a
+> identity for every Hub call. This banner is the committed bootstrap that the
+> "HCE Hub coordination (optional)" section further down allows a fork to
+> carry, so no `CLAUDE.local.md` is needed. The process lives at
+> `hub://process/core` and `hub://process/sunrise-platform`. Each Sunrise sync
+> is a task on the standing feature `f-upstream`; post-launch holding-page work is a
 > `bug` or `enhancement` on `f-holding-page`.
 
 Instructions for Claude Code when working in this repository.
