@@ -39,7 +39,8 @@ describe('HomePage', () => {
     const { container } = render(React.createElement(HomePage));
 
     container.querySelectorAll('a').forEach((link) => {
-      expect(link.getAttribute('href') ?? '').not.toMatch(/github\.com/i);
+      const { hostname } = new URL(link.getAttribute('href') ?? '', 'https://hce.studio');
+      expect(hostname === 'github.com' || hostname.endsWith('.github.com')).toBe(false);
     });
   });
 
