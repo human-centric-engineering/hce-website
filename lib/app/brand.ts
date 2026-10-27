@@ -32,4 +32,4 @@ export const appBrandLegalName: string | null = 'All Too Human Ltd';
  * sentence is worse than a short one (#519).
  */
 export const appBrandDescription: string | null =
-  'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.';
+  'HCE is a human-centric venture studio building AI-native products with and for people.';

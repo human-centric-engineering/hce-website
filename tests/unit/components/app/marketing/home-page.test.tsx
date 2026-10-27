@@ -4,8 +4,8 @@
  * HomePage — the hce.studio holding page body.
  *
  * Covers the section content, internal/external links, and — importantly — a
- * regression guard that the confidential framework name ("Daybreak") and partner
- * venture ("Lelanea") never appear in the rendered output.
+ * regression guard that no project, venture or platform name appears in the
+ * rendered output, and that nothing links to source code.
  *
  * @see components/app/marketing/home-page.tsx
  */
@@ -16,7 +16,7 @@ import * as React from 'react';
 import HomePage from '@/components/app/marketing/home-page';
 
 describe('HomePage', () => {
-  it('renders the hero, three "doing now" cards, and three beliefs', () => {
+  it('renders the hero, three "working on" cards, and three beliefs', () => {
     const { container } = render(React.createElement(HomePage));
 
     // Structure, not exact copy — marketing prose is expected to change and
@@ -27,11 +27,20 @@ describe('HomePage', () => {
     expect(container.querySelectorAll('.belief')).toHaveLength(3);
   });
 
-  it('never leaks the confidential framework name or partner venture', () => {
+  it('never names projects, ventures or the platform', () => {
     const { container } = render(React.createElement(HomePage));
 
-    expect(container.textContent).not.toMatch(/Daybreak/i);
-    expect(container.textContent).not.toMatch(/Lelanea/i);
+    for (const name of [/Sunrise/i, /Daybreak/i, /ConQuest/i, /Lelanea/i, /Outcomes/i]) {
+      expect(container.textContent).not.toMatch(name);
+    }
+  });
+
+  it('never links to source code', () => {
+    const { container } = render(React.createElement(HomePage));
+
+    container.querySelectorAll('a').forEach((link) => {
+      expect(link.getAttribute('href') ?? '').not.toMatch(/github\.com/i);
+    });
   });
 
   it('points the primary CTAs at /contact and the whitepaper link at /whitepaper', () => {
@@ -48,13 +57,15 @@ describe('HomePage', () => {
   });
 
   it('opens external links safely (target=_blank + rel noopener noreferrer)', () => {
-    render(React.createElement(HomePage));
+    const { container } = render(React.createElement(HomePage));
 
-    const sunrise = screen.getByRole('link', { name: /Explore Sunrise/i });
-    expect(sunrise).toHaveAttribute('target', '_blank');
-    const rel = sunrise.getAttribute('rel') ?? '';
-    expect(rel).toContain('noopener');
-    expect(rel).toContain('noreferrer');
+    const external = container.querySelectorAll('a[target="_blank"]');
+    expect(external.length).toBeGreaterThan(0);
+    external.forEach((link) => {
+      const rel = link.getAttribute('rel') ?? '';
+      expect(rel).toContain('noopener');
+      expect(rel).toContain('noreferrer');
+    });
   });
 
   it('links both founders to their LinkedIn profiles', () => {
