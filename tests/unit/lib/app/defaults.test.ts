@@ -496,7 +496,7 @@ const SEAM_DEFAULTS: SeamDefault[] = [
       expect(seam.appBrandName).toBe('HCE Studio');
       expect(seam.appBrandLegalName).toBe('All Too Human Ltd');
       expect(seam.appBrandDescription).toBe(
-        'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.'
+        'HCE is a human-centric venture studio building AI-native products with and for people.'
       );
     },
   },

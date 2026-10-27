@@ -4,41 +4,32 @@ import Link from 'next/link';
 /**
  * HomePage — the hce.studio holding page.
  *
- * Bespoke single-scroll marketing page (hero -> what we're doing now -> what we
+ * Bespoke single-scroll marketing page (hero -> what we're working on -> what we
  * believe -> get in touch). Rendered via a thin-shim re-export from
  * app/(public)/page.tsx; the chrome (header/footer/first-light hairline) comes
  * from app/(public)/layout.tsx. Styling lives in marketing.css on top of the
  * brand theme (app/brand-theme.css).
  *
- * Copy is British English, no em dashes. Confidentiality: item 03's framework is
- * internally "Daybreak" and is NEVER named publicly (described by capability
- * only); the partner venture is referred to only as "a partner venture".
+ * Copy is British English, no em dashes. Deliberately directional: the
+ * "working on" cards describe themes, never named projects, ventures or the
+ * platform, and nothing links to source code. Nothing here is launched yet.
  */
 
-const SUNRISE_REPO = 'https://github.com/human-centric-engineering/sunrise';
 const LINKEDIN_SIMON = 'https://www.linkedin.com/in/simondholmes/';
 const LINKEDIN_JOHN = 'https://www.linkedin.com/in/johndurrant/';
 
+const DESCRIPTION =
+  'HCE is a human-centric venture studio building AI-native products with and for people.';
+
 export const metadata: Metadata = {
   title: { absolute: 'HCE Studio · Human-Centric Engineering' },
-  description:
-    'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.',
+  description: DESCRIPTION,
   openGraph: {
     title: 'HCE Studio · Human-Centric Engineering',
-    description:
-      'A human-centric engineering studio building agentic apps, websites, and tools on Sunrise, our open-sourced, production-ready foundation with AI orchestration built in.',
+    description: DESCRIPTION,
     type: 'website',
   },
 };
-
-/** GitHub octicon "mark-github" — fill inherits currentColor via CSS. */
-function GitHubMark() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
-    </svg>
-  );
-}
 
 export default function HomePage() {
   return (
@@ -47,87 +38,56 @@ export default function HomePage() {
       <section className="hero">
         <div className="hero__inner">
           <p className="kicker">Human-Centric Engineering · Studio</p>
-          <h1 className="hero__headline">Building experiences that weren’t possible a year ago.</h1>
+          <h1 className="hero__headline">Building what wasn’t possible a year ago.</h1>
           <p className="hero__subhead">
-            HCE is a human-centric engineering studio. We build agentic apps, websites, and tools on{' '}
-            <strong>Sunrise</strong>, our open-sourced, production-ready foundation with AI
-            orchestration built in. We move at AI speed without giving up craftsmanship.
+            HCE is a venture studio building AI-native products with and for people: our own
+            ventures, joint ventures with domain experts, and platforms with partners. We move at AI
+            speed without giving up craftsmanship.
           </p>
           <div className="cta-row">
             <Link href="/contact" className="cta cta--primary">
               Get in touch <span aria-hidden="true">→</span>
             </Link>
-            <a
-              href={SUNRISE_REPO}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cta cta--secondary"
-            >
-              <GitHubMark />
-              Explore Sunrise{' '}
-              <span className="cta__arrow" aria-hidden="true">
-                ↗
-              </span>
-            </a>
           </div>
         </div>
       </section>
 
-      {/* What we're doing now */}
+      {/* What we're working on */}
       <section className="doing">
-        <p className="section-label doing__label">What we’re doing now</p>
+        <p className="section-label doing__label">What we’re working on</p>
         <div className="doing__grid">
           <article className="card">
-            <p className="card__index">01 / Sunrise</p>
-            <h2 className="card__title">The foundation</h2>
-            <p className="card__body">
-              Our open-source, production-ready base for agentic software. Agents, capabilities,
-              knowledge, workflows, evaluation and governance, with orchestration built in.
-            </p>
-            <div className="card__action">
-              <a href={SUNRISE_REPO} target="_blank" rel="noopener noreferrer" className="pill">
-                <GitHubMark />
-                Fork on GitHub
-              </a>
-            </div>
-          </article>
-
-          <article className="card">
-            <p className="card__index">02 / ConQuest</p>
+            <p className="card__index">01 / Conversations</p>
             <h2 className="card__title">Conversations, not forms</h2>
             <p className="card__body">
-              A conversational questionnaire platform. A natural dialogue in place of form-filling.
-              An agent extracts, infers and synthesises answers, with confidence and provenance.
+              Replacing forms, scripts and fixed flows with real dialogue that understands what
+              people mean, not just what they tick.
             </p>
-            <div className="card__action">
-              <span className="chip">
-                <span className="chip__dot" aria-hidden="true" />
-                Coming soon
-              </span>
-            </div>
           </article>
 
           <article className="card">
-            <p className="card__index">03 / Expert-led journeys</p>
-            <h2 className="card__title">Guided, personal experiences</h2>
+            <p className="card__index">02 / Expertise</p>
+            <h2 className="card__title">Expertise, extended</h2>
             <p className="card__body">
-              A framework that turns the foundation’s primitives into guided, personalised,
-              expert-led apps. First in genre, a coaching journey built with a partner venture.
+              Turning what an expert knows into guided, personal experiences people can come back to
+              any time.
             </p>
-            <div className="card__action">
-              <span className="chip">
-                <span className="chip__dot" aria-hidden="true" />
-                In development
-              </span>
-            </div>
+          </article>
+
+          <article className="card">
+            <p className="card__index">03 / Foundations</p>
+            <h2 className="card__title">Production-ready from day one</h2>
+            <p className="card__body">
+              Everything we build runs on our own agentic platform, so an experiment can become a
+              real product without starting again.
+            </p>
           </article>
         </div>
 
         <div className="frontier">
           <span className="frontier__rule" aria-hidden="true" />
           <p className="frontier__text">
-            We’re building things that weren’t possible a year ago, on a foundation that’s
-            production-ready from day one. The possibilities on top of it are effectively endless.
+            Several things are in the studio right now. We’ll share more when they’re ready.
           </p>
         </div>
       </section>
@@ -172,8 +132,10 @@ export default function HomePage() {
 
       {/* Get in touch */}
       <section className="contact-cta">
-        <h2 className="contact-cta__heading">Let’s build something.</h2>
-        <p className="contact-cta__subhead">Have an idea? We’d like to hear from you.</p>
+        <h2 className="contact-cta__heading">Got something that needs building?</h2>
+        <p className="contact-cta__subhead">
+          Bring us the problem and the know-how. We’ll build it with you.
+        </p>
         <Link href="/contact" className="cta cta--primary cta--lg">
           Get in touch <span aria-hidden="true">→</span>
         </Link>

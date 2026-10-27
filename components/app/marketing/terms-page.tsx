@@ -23,7 +23,7 @@ const COMPANY = {
   legalEmail: 'legal@hce.studio',
 } as const;
 
-const LAST_UPDATED = '10 July 2026';
+const LAST_UPDATED = '27 October 2026';
 
 /**
  * Terms of Use — hce.studio.
@@ -91,16 +91,15 @@ export default function TermsPage() {
             The Site, including its content, design and branding, is owned by us or our licensors
             and is protected by intellectual property laws. The name “{BRAND.name}”, “Human-Centric
             Engineering” and our logos are our trade marks and may not be used without our
-            permission. This Site is built on Sunrise, our open-source foundation, which is licensed
-            under its own terms; other third-party and open-source components are licensed under
+            permission. Third-party and open-source components used in the Site are licensed under
             their respective licences.
           </p>
 
           <h2>External links</h2>
           <p>
-            The Site links to third-party websites (for example our source code on GitHub and our
-            profiles on LinkedIn). We provide these links for convenience and are not responsible
-            for the content, policies or availability of sites we do not control.
+            The Site links to third-party websites (for example our profiles on LinkedIn). We
+            provide these links for convenience and are not responsible for the content, policies or
+            availability of sites we do not control.
           </p>
 
           <h2>Availability and changes</h2>
