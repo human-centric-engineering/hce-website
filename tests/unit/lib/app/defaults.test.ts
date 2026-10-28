@@ -29,7 +29,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { scaffoldsOnDisk } from '@/tests/helpers/app-scaffolds';
+import { ownModuleProblems, scaffoldsOnDisk, unlistedSeams } from '@/tests/helpers/app-scaffolds';
 import { registerAppRateLimits } from '@/lib/app/rate-limit';
 import { registerAppTenantResolver } from '@/lib/app/tenant-resolver';
 import { hasTenantResolver } from '@/lib/tenancy/resolver';
@@ -50,6 +50,7 @@ import { initAppGuardFloorContributors } from '@/lib/app/guard-floor-contributor
 import { initAppGuardEventContributors } from '@/lib/app/guard-event-contributors';
 import { appAgentFields } from '@/lib/app/agent-fields';
 import { appProtectedRoutes } from '@/lib/app/protected-routes';
+import { appCredentialPaths } from '@/lib/app/credential-paths';
 import { appEnvSchema } from '@/lib/app/env';
 import { footerCopyright } from '@/lib/app/footer';
 import { APP_API_KEY_SCOPES } from '@/lib/app/api-key-scopes';
@@ -62,6 +63,7 @@ import {
   appOwnerlessSurfaceExceptions,
 } from '@/lib/app/ci';
 import { occupiedTiers } from '@/lib/app/reserved-tiers';
+import { appOwnModules } from '@/lib/app/own-modules';
 import { APP_CAPABILITY_PAIRS, APP_UNCHECKED_SEEDS } from '@/lib/app/capability-seed-pairs';
 import { initAppUserCreatedHooks } from '@/lib/app/user-created';
 import { collectAppSubjectData } from '@/lib/app/data-export';
@@ -108,10 +110,14 @@ import {
 } from '@/lib/account-sections/registry';
 import { initAppAuthorizationPolicy } from '@/lib/app/authorization';
 import { ORG_TIER_ADMIN_PAGES, adminPageTier } from '@/lib/auth/admin-tier';
+import { APP_ORG_TIER_ADMIN_ROUTES } from '@/lib/app/admin-tier-routes';
+import { appOrgAdminLandingRoute } from '@/lib/app/admin-landing';
+import { orgAdminLanding } from '@/lib/auth/admin-landing';
 import {
   getAppOrgTierAdminPages,
   orgTierAdminPages,
   __resetAppOrgTierAdminPagesForTests,
+  closedCoreOrgTierSections,
 } from '@/lib/auth/org-tier-admin-pages';
 import {
   appOwnerClassifications,
@@ -338,6 +344,11 @@ const SEAM_DEFAULTS: SeamDefault[] = [
     assert: () => expect(appProtectedRoutes).toEqual([]),
   },
   {
+    seam: 'lib/app/credential-paths.ts',
+    risk: 'a stray pattern would blank a route word out of every install’s logs and analytics',
+    assert: () => expect(appCredentialPaths).toEqual([]),
+  },
+  {
     seam: 'lib/app/env.ts',
     risk: 'a stray key would make an unset env var fail boot on every install',
     // An empty z.object() accepts (and strips) anything → parses {} to {}.
@@ -444,7 +455,7 @@ const SEAM_DEFAULTS: SeamDefault[] = [
   },
   {
     seam: 'lib/app/admin-tier.ts',
-    risk: 'a stray pattern would open that admin page to every org OWNER/ADMIN on every install — the page only, since its API routes declare their own tier, but a page core meant for platform admins alone',
+    risk: 'a stray pattern would open that admin page to every org OWNER/ADMIN on every install — the page only, since its API routes declare their own tier, but a page core meant for platform admins alone; a stray closeCoreOrgTierSection() would shut orchestration to every org admin on every install',
     assert: () => {
       __resetAppOrgTierAdminPagesForTests();
       // The read triggers the lazy init, so this exercises the REAL seam.
@@ -452,6 +463,23 @@ const SEAM_DEFAULTS: SeamDefault[] = [
       // …and the roster the layout reads and hands the gate is exactly core's.
       expect(orgTierAdminPages()).toEqual(ORG_TIER_ADMIN_PAGES);
       expect(adminPageTier('/admin/users', orgTierAdminPages())).toBeNull();
+      // …and it closes none of core's sections (t-929), so the routes keep
+      // the tier they declare.
+      expect(closedCoreOrgTierSections()).toEqual([]);
+    },
+  },
+  {
+    seam: 'lib/app/admin-tier-routes.ts',
+    risk: "a stray entry would let a route declaring tier 'org' pass the roster test without core's list naming it — it opens nothing by itself, but the opening would no longer show in the diff a reviewer reads",
+    assert: () => expect(APP_ORG_TIER_ADMIN_ROUTES).toEqual([]),
+  },
+  {
+    seam: 'lib/app/admin-landing.ts',
+    risk: 'a stray route would send every org OWNER/ADMIN on every install somewhere other than their orchestration dashboard when they open the console',
+    assert: () => {
+      expect(appOrgAdminLandingRoute).toBeNull();
+      // …and /admin sends an org admin exactly where it did before the seam.
+      expect(orgAdminLanding()).toBe('/admin/orchestration');
     },
   },
   {
@@ -470,6 +498,23 @@ const SEAM_DEFAULTS: SeamDefault[] = [
     // pinned to the fork's value rather than deleted, so the tiers NOT declared
     // here keep their guard.
     assert: () => expect(occupiedTiers).toEqual(['components/app', '.context/app']),
+  },
+  {
+    seam: 'lib/app/own-modules.ts',
+    risk: 'a stray entry would exempt a lib/app/ entry from the version contract, the fork guide and this table on every install, so a real seam could ship with no breaking-change announcement',
+    // Not pinned to []: a leaf fork that declares its modules would otherwise
+    // edit this row, in a Sunrise file, which is the cost #847 removes. What
+    // it asserts still fails on a stray upstream entry, because every seam
+    // Sunrise ships has a row here or in UNASSERTED_SEAMS, and an entry with
+    // a row is refused. Upstream, that leaves no declarable entry at all.
+    assert: () =>
+      expect(
+        ownModuleProblems(appOwnModules, scaffoldsOnDisk(), {
+          SEAM_DEFAULTS: SEAM_DEFAULTS.map((s) => s.seam),
+          UNASSERTED_SEAMS: [...UNASSERTED_SEAMS],
+        }),
+        'lib/app/own-modules.ts declares entries that cannot be honoured (see each message)'
+      ).toEqual([]),
   },
   {
     seam: 'lib/app/capability-seed-pairs.ts',
@@ -602,8 +647,10 @@ describe('lib/app/ seams ship empty', () => {
     // `lib/app/<name>/`, and a file of any extension is owed one too.
     const onDisk = scaffoldsOnDisk();
 
+    // A leaf fork's own modules (lib/app/own-modules.ts) are not seams and owe
+    // no row (#847).
     const covered = new Set(SEAM_DEFAULTS.map((s) => s.seam));
-    const missing = onDisk.filter((f) => !covered.has(f) && !UNASSERTED_SEAMS.has(f));
+    const missing = unlistedSeams([...covered, ...UNASSERTED_SEAMS]);
     const stale = [...covered].filter((f) => !onDisk.includes(f));
 
     expect(missing, 'lib/app/ seam with no row in SEAM_DEFAULTS').toEqual([]);
