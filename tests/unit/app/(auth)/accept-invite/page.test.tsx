@@ -118,7 +118,7 @@ describe('AcceptInvitePage', () => {
       render(<AcceptInvitePage />);
 
       // Assert: Description is displayed
-      const description = screen.getByText('Set your password to activate your account');
+      const description = screen.getByText('Accept your invitation, or decline it');
       expect(description).toBeInTheDocument();
     });
 
@@ -155,7 +155,7 @@ describe('AcceptInvitePage', () => {
 
       // Assert: Both title and description are in the header
       const title = screen.getByText('Accept Invitation');
-      const description = screen.getByText('Set your password to activate your account');
+      const description = screen.getByText('Accept your invitation, or decline it');
 
       expect(title).toBeInTheDocument();
       expect(description).toBeInTheDocument();
@@ -221,7 +221,7 @@ describe('AcceptInvitePage', () => {
   describe('metadata', () => {
     it('should have correct title in metadata', async () => {
       // Import the metadata separately
-      const { metadata } = await import('@/app/(auth)/accept-invite/page');
+      const metadata = await (await import('@/app/(auth)/accept-invite/page')).generateMetadata();
 
       // Assert: Metadata title is correct
       expect(metadata.title).toBe('Accept Invitation');
@@ -229,7 +229,7 @@ describe('AcceptInvitePage', () => {
 
     it('should have correct description in metadata', async () => {
       // Import the metadata separately
-      const { metadata } = await import('@/app/(auth)/accept-invite/page');
+      const metadata = await (await import('@/app/(auth)/accept-invite/page')).generateMetadata();
 
       // Assert: Metadata description is correct
       expect(metadata.description).toBe('Accept your invitation to join Sunrise');
@@ -267,7 +267,7 @@ describe('AcceptInvitePage', () => {
       render(<AcceptInvitePage />);
 
       // Assert: Description explains what user needs to do
-      const description = screen.getByText('Set your password to activate your account');
+      const description = screen.getByText('Accept your invitation, or decline it');
       expect(description).toBeInTheDocument();
     });
   });

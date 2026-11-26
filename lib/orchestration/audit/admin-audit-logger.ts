@@ -12,6 +12,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/logging';
 import { getTenantContext } from '@/lib/tenancy/context';
+import { INSTALL_ORG_ID } from '@/lib/tenancy/constants';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,14 @@ export interface AdminAuditEntry {
    * route's `support.enter`, which does not enter the org it switches to.
    */
   support?: AuditSupportStamp;
+  /**
+   * The org whose data this action changed, when the route acts on an org it
+   * is not inside (t-1005): a platform admin changing an org's caps from the
+   * install org, or with an admin API key. `null` says the action belongs to
+   * no org's history. Leave it out everywhere else: {@link logAdminAction}
+   * takes the org from the tenant context.
+   */
+  actingOrgId?: string | null;
 }
 
 /** The grant an audit row was made under, and the org it was made in. */
@@ -58,6 +67,25 @@ export interface AuditSupportStamp {
 // js/regex/missing-regexp-anchor).
 const SECRET_PATTERN = /password|secret|credential|(?:key|token)(?:(?:s|hash(?:es)?)?$)/i;
 
+/** The words that name a secret wherever they appear; the rest of the pattern is the key/token suffix. */
+const SECRET_WORD = /password|secret|credential/i;
+
+/**
+ * Whether `field` holding `values` is redacted. The key/token suffix also
+ * names counts, prices and limits — `maxTokens`, `inputTokens`,
+ * `inputCostPerMillionTokens`, `rateLimitPerKey` — and every such column is a
+ * number, while every credential it names (`apiKey`, `refreshToken`,
+ * `leaseToken`) is a string. So under the suffix rule a number (or `null`) is
+ * shown and anything else is redacted. Before §136 t-1064 every price and
+ * token limit in an audit diff was stored as `[REDACTED]`. The words
+ * (`password`, `secret`, `credential`) redact whatever the value.
+ */
+function isRedacted(field: string, ...values: unknown[]): boolean {
+  if (!SECRET_PATTERN.test(field)) return false;
+  if (SECRET_WORD.test(field)) return true;
+  return !values.every((v) => v === null || (typeof v === 'number' && Number.isFinite(v)));
+}
+
 function sanitizeChanges(
   changes: Record<string, { from: unknown; to: unknown }> | null | undefined
 ): Record<string, { from: unknown; to: unknown }> | null {
@@ -65,7 +93,7 @@ function sanitizeChanges(
 
   const sanitized: Record<string, { from: unknown; to: unknown }> = {};
   for (const [field, diff] of Object.entries(changes)) {
-    if (SECRET_PATTERN.test(field)) {
+    if (isRedacted(field, diff.from, diff.to)) {
       sanitized[field] = { from: '[REDACTED]', to: '[REDACTED]' };
     } else {
       sanitized[field] = {
@@ -78,13 +106,18 @@ function sanitizeChanges(
 }
 
 function sanitizeMetadataValue(value: unknown): unknown {
+  // A Date has no own enumerable keys, so walking it as an object stored `{}`
+  // for every date in an audit diff (found in §136 t-1064).
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
   if (Array.isArray(value)) {
     return value.map(sanitizeMetadataValue);
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = SECRET_PATTERN.test(key) ? '[REDACTED]' : sanitizeMetadataValue(v);
+      out[key] = isRedacted(key, v) ? '[REDACTED]' : sanitizeMetadataValue(v);
     }
     return out;
   }
@@ -151,14 +184,48 @@ function supportStampFromContext(): AuditSupportStamp | null {
 }
 
 /**
+ * The org whose history a row belongs to (t-1005): the org whose data the
+ * action changed. In order —
+ *
+ * 1. the caller's explicit `actingOrgId`, for a route acting on an org it may
+ *    be outside of (`/admin/orgs/[id]`, the support grants, a backup's scope);
+ * 2. the support stamp's org: a support session's, or the one `support.enter`
+ *    names, which is the org entered;
+ * 3. the org the call stack runs in — the org every tenant-owned write in it
+ *    lands in. A system scope names none. With no context at all, the install
+ *    org: at `single` that is what the data layer reads, and at `multi` the
+ *    only caller with none is an unbound admin API key, which acts as the
+ *    install org (owner ruling, 2026-10-02; see `withAdminAuth`).
+ *
+ * A route whose surface is platform-tier is not treated differently: most of
+ * them change the entered org's own rows (clearing its conversations,
+ * force-failing its run), which belong in its history. The ones that change
+ * shared settings are refused outside the install org, so they land in the
+ * vendor's own history.
+ *
+ * Read synchronously when the action is logged, as the support stamp is.
+ */
+function actingOrgFor(entry: AdminAuditEntry, support: AuditSupportStamp | null): string | null {
+  if (entry.actingOrgId !== undefined) return entry.actingOrgId;
+  if (support) return support.orgId;
+  const context = getTenantContext();
+  return context ? context.orgId : INSTALL_ORG_ID;
+}
+
+/**
  * Log an admin action. Fire-and-forget — never throws to the caller.
  *
- * Inside a support session (§121 t-825) the row is stamped with the grant and
- * the org from the tenant context, so every caller's row names the support
+ * Each row names the org whose history it belongs to (`actingOrgId`, t-1005;
+ * the rule is `actingOrgFor`), so an org can be shown its own admin history
+ * (`listOrgAuditLog`).
+ *
+ * Inside a support session (§121 t-825) the row is also stamped with the grant
+ * and the org from the tenant context, so every caller's row names the support
  * actor's grant without the caller knowing a support session exists.
  */
 export function logAdminAction(entry: AdminAuditEntry): void {
   const support = entry.support ?? supportStampFromContext();
+  const actingOrgId = actingOrgFor(entry, support);
   void prisma.aiAdminAuditLog
     .create({
       data: {
@@ -178,6 +245,7 @@ export function logAdminAction(entry: AdminAuditEntry): void {
         clientIp: entry.clientIp ?? null,
         supportGrantId: support?.grantId ?? null,
         supportOrgId: support?.orgId ?? null,
+        actingOrgId,
       },
     })
     .catch((err: unknown) => {

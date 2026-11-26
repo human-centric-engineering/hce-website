@@ -30,11 +30,18 @@ the per-admin export sub-cap noted below.
 | `GET /api/v1/orgs/[id]`                     | `withAuth`      | Any member of that org (keyed on the caller's own membership).                                                                                         |
 | `GET/POST /api/v1/orgs/[id]/members`        | `withAuth`      | The org's OWNER/ADMIN **while acting in it**, or a platform admin — the policy's org arm. Browser session only (`GET` included: the roster is people). |
 | `PATCH/DELETE …/members/[userId]`           | `withAuth`      | As above. Granting `OWNER`, or changing / removing an `OWNER`, needs an OWNER (or platform admin).                                                     |
+| `PUT /api/v1/orgs/[id]/locale`              | `withAuth`      | The org's OWNER/ADMIN **while acting in it**. Browser session only; not a support session.                                                             |
+| `GET /api/v1/orgs/[id]/audit-log`           | `withAuth`      | As the roster: the org's OWNER/ADMIN while acting in it, or a platform admin. Browser session only (every row names a person).                         |
 | `POST /api/v1/orgs/[id]/invitations`        | `withAuth`      | As above. Inviting as `OWNER` needs an OWNER (or platform admin). Not the install org. Per-IP invite sub-cap.                                          |
+| `POST /api/v1/invitations/accept`           | `withAuth`      | A session signed in as the invited, verified address; browser session only. Per-IP accept-invite sub-cap.                                              |
+| `POST /api/v1/invitations/decline`          | none            | Whoever holds the invitation token. Per-IP accept-invite sub-cap.                                                                                      |
 | `GET/POST /api/v1/admin/orgs`               | `withAdminAuth` | Platform admins.                                                                                                                                       |
 | `GET/PATCH/DELETE /api/v1/admin/orgs/[id]`  | `withAdminAuth` | Platform admins.                                                                                                                                       |
 | `GET /api/v1/admin/orgs/[id]/export`        | `withAdminAuth` | Platform admins; per-admin sub-cap.                                                                                                                    |
 | `GET/PUT /api/v1/admin/orgs/[id]/providers` | `withAdminAuth` | Platform admins.                                                                                                                                       |
+| `GET/PUT /api/v1/admin/orgs/[id]/privacy`   | `withAdminAuth` | Platform admins.                                                                                                                                       |
+| `GET/PATCH/DELETE …/orgs/[id]/entitlements` | `withAdminAuth` | Platform admins.                                                                                                                                       |
+| `GET/PATCH …/orgs/[id]/meters`              | `withAdminAuth` | Platform admins.                                                                                                                                       |
 
 "While acting in it" is t-671's rule: the policy compares the org the guard
 _entered_ for the request — the session's active org, or the proxy's
@@ -147,7 +154,7 @@ GET /api/v1/orgs/[id]
     "name": "Acme",
     "status": "ACTIVE",
     "createdAt": "…",
-    "settings": { "retention": { "executionRetentionDays": 365 } },
+    "settings": { "retention": { "executionRetentionDays": 365 }, "locale": "en" },
     "memberCount": 4,
     "role": "MEMBER",
     "joinedAt": "…"
@@ -164,7 +171,28 @@ platform can only vouch for the key it owns. The whole column is on the
 platform-admin view below. A window whose stored value cannot be read is
 reported as absent, exactly as the sweep treats it.
 
+`settings.locale` is the org's default interface language (§138), `null` when
+it has none. A value that is not a language tag reads as `null`. See
+[Interface languages](../ui/i18n.md).
+
 - **403 Forbidden** `Access denied`: not a member, or no such org.
+
+### The org's default language
+
+```
+PUT /api/v1/orgs/[id]/locale
+{ "locale": "en-XA" }
+```
+
+Sets the language the org's members see when they have not chosen one of their
+own; `null` clears it. The locale must be one the interface has a catalogue
+for (`400` otherwise). Answers `{ "orgId": "…", "locale": "en-XA" }`. A change
+is audited as `org.locale.update`; saving the value already stored writes and
+audits nothing.
+
+- **403 Forbidden**: not the org's OWNER/ADMIN, not acting in this org, an API
+  key, or a support session (it is the org's own choice).
+- **409 Conflict**: another settings write landed at the same time; retry.
 
 ### The roster
 
@@ -208,8 +236,11 @@ POST /api/v1/orgs/[id]/members
 - `userId`: required, an existing user's id (cuid). The seeded SERVICE account
   is refused as if missing.
 - `role`: optional, `OWNER` / `ADMIN` / `MEMBER`. Default `MEMBER` — except
-  that the first member of an **empty** org becomes `OWNER` when no role is
-  asked for (the invitation path's bootstrap). `OWNER` needs OWNER standing.
+  that, when no role is asked for, the org's **first member who isn't
+  platform staff** becomes `OWNER` (the invitation path's bootstrap; staff
+  already in the org don't stop it, #1178, and any non-staff member, an ADMIN
+  included, does), when the caller holds owner standing. `OWNER` needs OWNER
+  standing.
   On the install org a `role` is refused: roles there follow the platform role.
 
 Adding by id enrols the user without asking them — it mirrors the platform
@@ -222,7 +253,12 @@ only that a cuid — unguessable — does not name a user.
 **Response** (201 Created): the membership row.
 
 **Error Responses**: `400` with code `INSTALL_ORG_MEMBERSHIP` (a role on the
-install org) · `403 OWNER_STANDING` · `404 USER_NOT_FOUND` · `409 ALREADY_MEMBER`.
+install org) · `403 OWNER_STANDING` · `403 FORBIDDEN` with
+`details.reason: 'meter_limit_reached'` (the org is at its seats limit, §135
+t-1035; asked after the checks below, so they answer first. A platform admin
+is not refused, a user who is platform staff takes no seat, and a user with
+an open invitation into the org already holds one) · `404 USER_NOT_FOUND` ·
+`409 ALREADY_MEMBER`.
 
 ### Invite someone into the org
 
@@ -234,6 +270,13 @@ POST /api/v1/orgs/[id]/invitations?resend=true
 The org's own invitation (§111 t-813), behind the Members page. Same admission
 as the members routes. The invitee joins this org on acceptance, as a platform
 `USER`.
+
+**An address that already has an account is invited the same way** (#1199).
+The answer does not depend on whether the account exists. The email asks an
+existing account to sign in and accept (`POST /api/v1/invitations/accept`)
+rather than set a password. Pending invitations are kept one per (email, org),
+so an invitation into another org neither blocks this one nor is touched by
+it. See [identity.md](../tenancy/identity.md#accepting-as-an-existing-account).
 
 **Request Body** (`inviteOrgMemberSchema`):
 
@@ -261,10 +304,34 @@ pending, the answer is `200` with `emailStatus: "pending"` and no link. Send
 
 **Error Responses**: `400 INSTALL_ORG_MEMBERSHIP` (invite into the install org
 from Users) · `400 ORG_NOT_ACTIVE` (suspended) · `403 OWNER_STANDING` ·
-`409 EMAIL_TAKEN` (the email has an account; a platform admin adds it by id) ·
-`409 CONFLICT` (an invitation for this email is pending into another org, or
-carries a platform role; it is left untouched and not named) · `429` (invite
-sub-cap).
+`403 FORBIDDEN` with `details.reason: 'meter_limit_reached'` (a new invitation
+when the org is at its seats limit, §135 t-1035: a pending invitation holds a
+seat; a resend and a platform admin are not refused) ·
+`409 ALREADY_MEMBER` (already a member of this org) · `409 CONFLICT` (a
+platform invitation for this email is pending, carrying a platform role or
+naming no org, or one this route cannot read; it is left untouched and not
+named) · `429` (invite sub-cap).
+
+### Accept or decline an invitation
+
+```
+POST /api/v1/invitations/accept    { token, email }   — signed in, browser session
+POST /api/v1/invitations/decline   { token, email }   — public, token-gated
+```
+
+**Accept** is for an address that already has an account (#1199). The session
+must be signed in as the invited address, verified. The membership follows the
+new-account rule (the invitation's `orgRole`, default `MEMBER`, and `OWNER` for
+the org's first non-staff member). Only that invitation is consumed.
+**Response** (200): `{ message, membership: { orgId, role } }`.
+**Errors**: `403 INVITATION_WRONG_ACCOUNT` (signed in as another address) ·
+`403 EMAIL_NOT_VERIFIED` · `404` (no such invitation, or already used) ·
+`409 ALREADY_MEMBER` (the moot invitation is deleted) ·
+`409 INVITATION_NEEDS_NEW_ACCOUNT` (a platform invitation, which only creates
+an account) · `410 INVITATION_EXPIRED` · `429` (accept-invite sub-cap).
+
+**Decline** deletes only the invitation the token names, expired or not, and
+needs no session. **Errors**: `404` · `429`.
 
 ### Change a member's role
 
@@ -301,6 +368,48 @@ standing, and an OWNER may remove themselves only while another OWNER stands.
 **Error Responses**: `403 OWNER_STANDING` · `400 LAST_OWNER` ·
 `400 INSTALL_ORG_MEMBERSHIP` (a user leaves the install org by having their
 account deleted) · `404 NOT_A_MEMBER`.
+
+### The org's admin history
+
+```
+GET /api/v1/orgs/[id]/audit-log?page=&limit=&userId=&entityType=
+```
+
+The admin audit rows belonging to this org, newest first (t-1005): its
+members' actions, support's, and the vendor's changes to the org. `limit`
+defaults to 50, max 100. `userId` narrows to one person; `entityType` is a
+comma-separated list (at most 20) narrowing to those entity types. Which rows
+belong to the org, what each holds, what it leaves out and why, is in
+[the audit log guide](../admin/orchestration-audit-log.md#the-org-a-row-was-made-in).
+
+**Response** (200 OK, paginated):
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "cm…",
+      "action": "agent.update",
+      "entityType": "agent",
+      "entityId": "cm…",
+      "entityName": "Support bot",
+      "changes": { "name": { "from": "Old", "to": "New" } },
+      "metadata": null,
+      "createdAt": "…",
+      "actor": { "id": "cm…", "name": "Jane" },
+      "support": null
+    }
+  ],
+  "meta": { "page": 1, "limit": 50, "total": 1, "totalPages": 1 }
+}
+```
+
+`support` is `{ grantId }` on a row made in a support session (`grantId` is
+null once the grant has gone), and `null` otherwise.
+
+**Error Responses**: `403` for an API key, a MEMBER, a caller acting in another
+org, or no such org.
 
 ## Platform view
 
@@ -451,6 +560,107 @@ validation error; or a malformed body) · `400 INSTALL_ORG_IMMUTABLE`
 (a `PUT` naming the install org, which may use every provider) ·
 `404 ORG_NOT_FOUND` · `409 CONFLICT` (another write to the org's settings
 landed at the same time; nothing was written, so retry).
+
+### An org's LLM privacy settings
+
+```
+GET /api/v1/admin/orgs/[id]/privacy
+PUT /api/v1/admin/orgs/[id]/privacy
+```
+
+The org's privacy floor and the names it always protects (§127 t-1010). A
+`PUT` replaces both: `{ minimumMode, protectedTerms }`, where `minimumMode` is
+`detect`, `pseudonymise`, `redact`, `block` or `null` (none), and
+`protectedTerms` is a list of `{ value, type }` with `type` `PERSON` or `ORG`
+and `value` 3 to 200 characters, at most 500, the same name twice (ignoring
+case) kept once. Both keys are required, so a replace cannot drop one by
+leaving it out. It writes an `org.privacy.replace` audit row with the floor
+and how many terms it replaced, never the names.
+
+Both return `{ orgId, saved, unreadable, minimumMode, protectedTerms }`.
+`saved` is false until the org first saves, which is when the org page
+suggests its own name as a term. `unreadable` is true when the stored slice
+does not parse: the privacy layer then refuses every AI call made for the
+org until it is saved again. The floor only raises the mode a call runs
+under, and both apply from the next chat turn or workflow step. See
+[LLM privacy layer → What is built (t-1010)](../privacy/llm-privacy-layer.md#what-is-built-t-1010).
+
+**Error Responses**: `400 VALIDATION_ERROR` (a missing key, `off` as the
+floor, a term too short or of another type, an unknown key) ·
+`404 ORG_NOT_FOUND` · `409 CONFLICT` (another write to the org's settings
+landed at the same time; nothing was written, so retry).
+
+### An org's entitlement switches
+
+```
+GET    /api/v1/admin/orgs/[id]/entitlements
+PATCH  /api/v1/admin/orgs/[id]/entitlements
+DELETE /api/v1/admin/orgs/[id]/entitlements
+```
+
+The switches the app registers and whether this org has each (§135 t-1033).
+A `PATCH` takes `{ on: string[], off: string[] }`, both required: the
+registered switches to set on and off. A switch named in neither is left as
+it is, so a caller cannot turn off one it did not know about. A `DELETE` puts
+every registered switch back to its default. Values stored for keys no app
+registers are kept by both. Each write that changes something writes an
+`org.entitlements.update` audit row with what it replaced. At `multi` the
+writes, like a caps write, come
+only from the install org or an unbound admin API key: a platform admin
+acting in a customer's org (as a member, or under a support grant) may read
+the switches as an org admin there but not change them.
+
+All three return `{ orgId, nothingSet, unreadable, mayChange,
+registrationFailed, switches, unregistered }`, where each switch is `{ key,
+label, description, whenNothingSet, on, atDefault }`, `on` is what the org
+has now and `atDefault` says nobody has set it on this org. `nothingSet` says
+that is true of every switch. `unreadable` is true when the stored slice does
+not parse, in which case the org has none on until it is saved again.
+`mayChange` says whether this caller may write from where it is.
+`registrationFailed` says the app's `initAppEntitlements()` threw, so there
+are no switches and every org has none of them. See
+[Entitlements](../tenancy/entitlements.md).
+
+**Error Responses**: `400 VALIDATION_ERROR` (a missing list, a malformed key, a
+key in both lists, or one no app registers, named in
+`details.unknownSwitches`) · `403 FORBIDDEN` (a write from a customer's org
+at `multi`, with `details.reason: shared_settings_install_org_only`) ·
+`404 ORG_NOT_FOUND` · `409 CONFLICT` (no app registers a switch, or its
+registration failed, so there is nothing to set; or another write to the
+org's settings landed at the same time, nothing was written, so retry).
+
+### An org's meters and limits
+
+```
+GET   /api/v1/admin/orgs/[id]/meters
+PATCH /api/v1/admin/orgs/[id]/meters
+```
+
+Every meter (the platform's seats first, then the app's), how many the org
+has within its window, and its limit (§135 t-1035). A `PATCH` takes
+`{ limits: { [key]: number | null } }`: a whole number from 0 sets a limit,
+`null` clears one, and a meter not named is left as it is. Limits stored for
+keys nothing registers are kept, and only `null` may name one; when the app's
+registration has failed, naming any key nothing registers is a `409`, to set
+or to clear, since it may be one of the app's. Each write that changes something writes an `org.meters.update` audit row
+with the limits before (as stored) and after. At `multi` the write comes only from the install org
+or an unbound admin API key, as for the switches.
+
+Both return `{ orgId, mayChange, registrationFailed, meters, unregistered }`,
+where each meter is `{ key, label, description, period, core, limit, used,
+window, countFailed }`. `period` is `'month'`, `'standing'` or `'custom'`;
+`window` is `{ from, to }` (ISO, `to` exclusive; both `null` for a standing
+count). `used` is counted whether or not a limit is set, and is `null` with
+`countFailed: true` when the count failed. `unregistered` maps kept keys to
+their limits. See [Entitlements](../tenancy/entitlements.md#meters-and-limits).
+
+**Error Responses**: `400 VALIDATION_ERROR` (no key named, a malformed key, a
+limit that is not a whole number from 0 to 1,000,000,000, or a limit for a key
+nothing registers, named in `details.unknownMeters`) · `403 FORBIDDEN` (a
+write from a customer's org at `multi`, with
+`details.reason: shared_settings_install_org_only`) · `404 ORG_NOT_FOUND` ·
+`409 CONFLICT` (another write to the org's settings landed at the same time;
+nothing was written, so retry).
 
 ### Erase an org
 

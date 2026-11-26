@@ -1,13 +1,16 @@
 'use client';
 
-import { useCallback, useState, type BaseSyntheticEvent } from 'react';
+import { useCallback, useMemo, useState, type BaseSyntheticEvent } from 'react';
+import { useTranslations } from 'next-intl';
 import type { FieldErrors, FieldValues } from 'react-hook-form';
 
 import {
   applyFieldErrors,
+  hasBlockedFields,
   invalidSave,
   readSaveError,
   unreadableNumbers,
+  type SaveErrorText,
   type SaveFailure,
 } from '@/lib/errors/save-error';
 
@@ -64,16 +67,54 @@ export interface SaveFailureState<TField extends string> {
   ) => (e: BaseSyntheticEvent) => void;
 }
 
-interface Options {
+interface Options<TValues extends FieldValues = FieldValues> {
   /** Shown when the server never answered with an error of its own. */
   fallback: string;
+  /**
+   * The form's live `formState.errors`. With it, a save the form's own
+   * validation blocked (`invalid`) follows the fields: the count by Save
+   * drops as they are fixed, and the summary goes when none are left (t-1013).
+   * A server's failure, or one the page showed itself, stays until the next
+   * Save either way.
+   */
+  errors?: FieldErrors<TValues>;
+  /**
+   * Builds the failure for a save the form's own validation blocked, in place
+   * of `invalidSave`: a tabbed form's own wording, its fields limited to the
+   * ones it can bring forward. `invalid` uses it on the press, and the summary
+   * re-runs it as the fields change, so it follows them too (t-1029). The
+   * summary still goes when no field is blocked, whatever this returns.
+   */
+  summarise?: (errors: FieldErrors<TValues>) => SaveFailure<string>;
 }
 
-interface FormOptions<TField extends string> extends Options {
+interface FormOptions<
+  TField extends string,
+  TValues extends FieldValues = FieldValues,
+> extends Options<TValues> {
   /** Server path → the form field that shows it (see `readSaveError`). */
   fields: Partial<Record<string, TField>>;
+  /** As in {@link Options}, naming only the form's own fields. */
+  summarise?: (errors: FieldErrors<TValues>) => SaveFailure<TField>;
   /** The form's `setError`, to put field messages under their fields. */
   setError?: SetFieldError<TField>;
+}
+
+/**
+ * The failure showing. For a save the form's own validation blocked, `key` is
+ * what its fields said when it was last shown, so the summary can follow them;
+ * null for any other failure, which stays as it is until the next Save.
+ */
+interface Shown<TField extends string> {
+  failure: SaveFailure<TField> | null;
+  key: string | null;
+}
+
+const NONE: Shown<never> = { failure: null, key: null };
+
+/** What a failure says, so an update that says nothing new keeps the same object. */
+function failureKey(failure: SaveFailure<string>): string {
+  return JSON.stringify([failure.message, failure.fields]);
 }
 
 /**
@@ -89,15 +130,38 @@ export const NO_SERVER_FIELDS: Partial<Record<string, never>> = Object.freeze({}
  *
  * @see .context/ui/form-errors.md
  */
-export function useSaveFailure(options: Options): SaveFailureState<string>;
-export function useSaveFailure<TField extends string>(
-  options: FormOptions<TField>
+export function useSaveFailure<TValues extends FieldValues = FieldValues>(
+  options: Options<TValues>
+): SaveFailureState<string>;
+export function useSaveFailure<TField extends string, TValues extends FieldValues = FieldValues>(
+  options: FormOptions<TField, TValues>
 ): SaveFailureState<TField>;
 export function useSaveFailure<TField extends string>(
   options: Options | FormOptions<TField>
 ): SaveFailureState<TField | string> {
-  const [failure, setFailure] = useState<SaveFailure<TField | string> | null>(null);
-  const { fallback } = options;
+  const [state, setState] = useState<Shown<TField | string>>(NONE);
+  const setFailure = useCallback(
+    (failure: SaveFailure<TField | string> | null, fromValidation = false) =>
+      setState({ failure, key: fromValidation && failure ? failureKey(failure) : null }),
+    []
+  );
+  const t = useTranslations('forms.saveError');
+  const text = useMemo<SaveErrorText>(
+    () => ({
+      fieldsNeedFixing: (count) => t('fieldsNeedFixing', { count }),
+      checkForm: t('checkForm'),
+      checkField: t('checkField'),
+      enterNumber: t('enterNumber'),
+      fieldsNeedNumber: (count) => t('fieldsNeedNumber', { count }),
+      tryAgain: t('tryAgain'),
+    }),
+    [t]
+  );
+  const ownSummary = useCallback(
+    <TValues extends FieldValues>(blocked: FieldErrors<TValues>) => invalidSave(blocked, text),
+    [text]
+  );
+  const { fallback, errors, summarise = ownSummary } = options;
   const fields = 'fields' in options ? options.fields : undefined;
   const setError = 'fields' in options ? options.setError : undefined;
 
@@ -116,24 +180,25 @@ export function useSaveFailure<TField extends string>(
       if (context) {
         // With nothing from the server, the context says it all: the page's
         // fallback would repeat it ("Couldn't update "X": Could not update…").
-        const said = next.message === fallback ? 'Try again.' : null;
+        const said = next.message === fallback ? text.tryAgain : null;
         next = { ...next, message: said ? `${context}. ${said}` : `${context}: ${next.message}` };
       }
       setFailure(next);
       return next;
     },
-    [fallback, fields, setError]
+    [fallback, fields, setError, setFailure, text]
   );
 
   const show = useCallback(
     (message: string, named: SaveFailure<TField | string>['fields'] = []) =>
       setFailure({ message, stale: false, fields: named }),
-    []
+    [setFailure]
   );
 
   const invalid = useCallback(
-    <TValues extends FieldValues>(errors: FieldErrors<TValues>) => setFailure(invalidSave(errors)),
-    []
+    <TValues extends FieldValues>(blocked: FieldErrors<TValues>) =>
+      setFailure(summarise(blocked), true),
+    [setFailure, summarise]
   );
 
   const block = useCallback(
@@ -145,11 +210,11 @@ export function useSaveFailure<TField extends string>(
     [show]
   );
 
-  const clear = useCallback(() => setFailure(null), []);
+  const clear = useCallback(() => setFailure(null), [setFailure]);
 
   const submit = useCallback(
     (handler: (e?: BaseSyntheticEvent) => Promise<void> | void) => (e: BaseSyntheticEvent) => {
-      const unreadable = unreadableNumbers(e.currentTarget);
+      const unreadable = unreadableNumbers(e.currentTarget, text);
       if (unreadable) {
         e.preventDefault();
         setFailure(unreadable);
@@ -158,8 +223,29 @@ export function useSaveFailure<TField extends string>(
       setFailure(null);
       void handler(e);
     },
-    []
+    [setFailure, text]
   );
+
+  // A blocked save follows the live field errors (t-1013), as derived state
+  // set during render: compared on what they say, because react-hook-form
+  // updates `formState.errors` in place. Every change is an update, marked so
+  // `<SaveError>` moves nothing, including one back to what the press said.
+  // When nothing is left to fix the failure is cleared, not hidden, so a field
+  // broken again later shows its own message without reviving the summary.
+  if (state.key !== null && errors) {
+    // No blocked field is nothing left: react-hook-form never passes a root
+    // error to onInvalid, and one set later wouldn't clear on re-validation.
+    // Asked of the errors, not of `summarise`'s fields, which a form may limit
+    // to the ones it can bring forward.
+    if (!hasBlockedFields(errors)) {
+      setState(NONE);
+    } else {
+      const live = summarise(errors);
+      const liveKey = failureKey(live);
+      if (liveKey !== state.key) setState({ failure: { ...live, updated: true }, key: liveKey });
+    }
+  }
+  const failure = state.failure;
 
   return { failure, report, show, invalid, block, clear, submit };
 }

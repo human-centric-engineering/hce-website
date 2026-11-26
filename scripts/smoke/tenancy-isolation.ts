@@ -38,6 +38,11 @@
  *     throws; a nested create lands in the org; `runAsSystem` sees both;
  *   - the three credential resolvers and the inbound route, called as
  *     nobody, learn B's org from B's row and hand it back / run inside it;
+ *   - organisations' own AI keys (§137 t-1044): each org resolves its own
+ *     sealed key and no other, cannot read, change or remove the other's
+ *     row, and an org's export carries neither its key nor the envelope.
+ *     Needs a sealed-secret master key (SEALED_SECRET_KEYS and
+ *     SEALED_SECRET_ACTIVE_KEY) in the run's environment;
  *   - the t-708 namespaces: `support` in both orgs, refused twice in one;
  *     the same file in both orgs; a default knowledge base per org;
  *   - a per-org platform job driven through the registry (§108 t-711): the
@@ -103,6 +108,9 @@
  *     is demoted, after revocation, and into A, which granted nothing; under
  *     a READ_ONLY grant a write is refused by the guard's rule and B's agents
  *     are unchanged;
+ *   - an org's admin history (t-1005): a support row and a member's row
+ *     made in B both name B, B's `listOrgAuditLog` reads both back and A's
+ *     reads neither, and after B's erasure both still name B;
  *   - the org export and erasure (§106 t-735, t-730): B's export, asked
  *     from inside A (an admin's session) and from no org (an admin API key),
  *     holds B's rows and none of A's; B, holding a knowledge base with
@@ -124,7 +132,13 @@
  * point is the policy), and skips clean when no database is reachable.
  * Self-cleaning: everything it creates is removed on the way out, under the
  * system scope, whether or not the assertions held — and a cleanup that
- * fails, fails the run.
+ * fails, fails the run. The install's embedding pin is set, for the run, to a
+ * model on the local provider the two orgs are confined to, and the
+ * operator's pin put back on the way out (#1144): a local provider is used for
+ * embeddings only through a pin (t-1011). An operator pin it replaced is
+ * recorded in a `SMOKE_ISO_EMBEDDING_PIN` feature flag, so a run that is
+ * killed before it can put the pin back leaves the next run to do it; a pin
+ * set while the smoke holds it is left as the operator set it.
  */
 import '@/prisma/load-env';
 import { NextRequest } from 'next/server';
@@ -145,6 +159,7 @@ import {
   revokeSupportGrant,
 } from '@/lib/tenancy/support-grants';
 import { logAdminAction } from '@/lib/orchestration/audit/admin-audit-logger';
+import { listOrgAuditLog } from '@/lib/orchestration/audit/org-audit-log';
 import { isRefusedReadOnlyWrite } from '@/lib/auth/support-principal';
 import {
   agentProfileUsage,
@@ -168,6 +183,14 @@ import { eraseUser } from '@/lib/privacy/erase-user';
 import { registerErasureCleanupHook } from '@/lib/privacy/erasure-hooks';
 import { writeOrgProviderPolicy, writeOrgQuotas } from '@/lib/tenancy/org-settings';
 import { forgetOrgProviderPolicy } from '@/lib/orchestration/llm/org-provider-policy';
+import {
+  forgetOrgProviderKey,
+  removeOrgProviderKey,
+  saveOrgProviderKey,
+} from '@/lib/orchestration/llm/org-provider-keys';
+import { resolveProviderCredential } from '@/lib/orchestration/llm/provider-credentials';
+import { invalidateOrchestrationSettingsCache } from '@/lib/orchestration/settings';
+import { isSealedSecretKeyConfigured } from '@/lib/security/sealed-secrets';
 import { hashApiKey } from '@/lib/auth/api-keys';
 import { listUserApiKeys, mintUserApiKey, revokeUserApiKey } from '@/lib/auth/user-api-keys';
 import { resolveApiKey } from '@/lib/auth/api-keys';
@@ -249,9 +272,26 @@ const DIMENSIONS = 1536;
 const EMBEDDING_MODEL = 'nomic-embed-text';
 /** The local provider this smoke seeds, and answers itself: embeddings and chat. */
 const LOCAL_PROVIDER_SLUG = `${PREFIX}-embed-${stamp}`;
+/**
+ * The embedding model the run pins on that provider. A local provider is used
+ * for embeddings only through a pin; the fallback chain never picks one
+ * (t-1011). As wide as the columns, so the pin needs no reset.
+ */
+const LOCAL_EMBEDDING_MODEL_SLUG = `${PREFIX}-embed-model-${stamp}`;
 const CHAT_MODEL = 'smoke-chat';
 /** What the fake judge scores every case — the number the run must carry back. */
 const JUDGE_SCORE = 0.8;
+/**
+ * The record of an embedding pin this smoke cleared (#1144): a feature-flag
+ * row, written in the same transaction as the clear and deleted in the same
+ * transaction as the restore. It outlives a run that dies before `finally`
+ * (SIGKILL, a cancelled job), so the next run puts the pin back first, and
+ * while it exists an operator can see in the admin flag list who holds the
+ * pin. Carries the `SMOKE_ISO_` prefix but is not one of the run's own flags:
+ * the cleanup leaves it to the restore.
+ */
+const EMBEDDING_PIN_MARKER = 'SMOKE_ISO_EMBEDDING_PIN';
+const embeddingPinMarkerSchema = z.object({ activeEmbeddingModelId: z.string().min(1) });
 
 async function dbReachable(): Promise<boolean> {
   try {
@@ -650,6 +690,124 @@ async function asPrincipal<T>(
   );
 }
 
+/**
+ * Clear the install's embedding pin for the run, recording it first (#1144).
+ * The record and the clear commit together, so there is never a cleared pin
+ * with no record of what it was. Returns the pin cleared, or null when the
+ * install had none.
+ */
+async function clearEmbeddingPin(): Promise<string | null> {
+  return runAsSystem('smoke: clear the embedding pin', () =>
+    prisma.$transaction(async (tx) => {
+      const settings = await tx.aiOrchestrationSettings.findUnique({
+        where: { slug: 'global' },
+        select: { activeEmbeddingModelId: true },
+      });
+      const pin = settings?.activeEmbeddingModelId;
+      if (!pin) return null;
+      await tx.featureFlag.create({
+        data: {
+          name: EMBEDDING_PIN_MARKER,
+          enabled: false,
+          description: `smoke:tenancy-isolation cleared the install's embedding pin (${pin}) and puts it back when the run ends, or at the start of the next run if this one was killed.`,
+          metadata: { activeEmbeddingModelId: pin },
+        },
+      });
+      await tx.aiOrchestrationSettings.update({
+        where: { slug: 'global' },
+        data: { activeEmbeddingModelId: null },
+      });
+      return pin;
+    })
+  );
+}
+
+/**
+ * Pin the run's own local embedding model (t-1011). Only over an empty
+ * setting: {@link clearEmbeddingPin} has run, and a pin set since is the
+ * operator's newer choice. Returns whether it pinned.
+ */
+async function pinLocalEmbeddingModel(modelRowId: string): Promise<boolean> {
+  return runAsSystem('smoke: pin the local embedding model', async () => {
+    const { count } = await prisma.aiOrchestrationSettings.updateMany({
+      where: { slug: 'global', activeEmbeddingModelId: null },
+      data: { activeEmbeddingModelId: modelRowId },
+    });
+    return count > 0;
+  });
+}
+
+/**
+ * Put back an embedding pin this smoke (this run or a killed earlier one)
+ * cleared, and drop the record. First un-pins a model this smoke pinned (its
+ * row's slug carries the prefix), so the setting is empty again before the
+ * operator's pin is written back. The pin is written only while the setting is
+ * still empty: one set during the run is the operator's newer choice and
+ * stays. Returns what happened, or null when there was nothing to restore.
+ */
+async function restoreEmbeddingPin(): Promise<{
+  pin: string;
+  restored: boolean;
+  current: string | null;
+} | null> {
+  return runAsSystem('smoke: restore the embedding pin', () =>
+    prisma.$transaction(async (tx) => {
+      // This run's pin, or one a killed run left: never the operator's.
+      await tx.aiOrchestrationSettings.updateMany({
+        where: {
+          slug: 'global',
+          activeEmbeddingModel: { slug: { startsWith: `${PREFIX}-` } },
+        },
+        data: { activeEmbeddingModelId: null },
+      });
+      const marker = await tx.featureFlag.findUnique({
+        where: { name: EMBEDDING_PIN_MARKER },
+        select: { metadata: true },
+      });
+      if (!marker) return null;
+      const parsed = embeddingPinMarkerSchema.safeParse(marker.metadata);
+      if (!parsed.success) {
+        throw new Error(
+          `the ${EMBEDDING_PIN_MARKER} flag does not name a pin (${JSON.stringify(marker.metadata)}) — check ai_orchestration_settings."activeEmbeddingModelId" by hand, then delete the flag`
+        );
+      }
+      const pin = parsed.data.activeEmbeddingModelId;
+      const { count } = await tx.aiOrchestrationSettings.updateMany({
+        where: { slug: 'global', activeEmbeddingModelId: null },
+        data: { activeEmbeddingModelId: pin },
+      });
+      await tx.featureFlag.delete({ where: { name: EMBEDDING_PIN_MARKER } });
+      if (count > 0) return { pin, restored: true, current: pin };
+      const settings = await tx.aiOrchestrationSettings.findUnique({
+        where: { slug: 'global' },
+        select: { activeEmbeddingModelId: true },
+      });
+      return { pin, restored: false, current: settings?.activeEmbeddingModelId ?? null };
+    })
+  );
+}
+
+/** Restore the pin and say what happened. A restore that fails fails the run. */
+async function restoreEmbeddingPinAndReport(): Promise<void> {
+  try {
+    const outcome = await restoreEmbeddingPin();
+    if (!outcome) return;
+    if (outcome.restored) {
+      console.log(`restored the install's embedding pin (${outcome.pin})`);
+    } else {
+      console.log(
+        `left the install's embedding pin as it is (${outcome.current}): it was set while the smoke held ${outcome.pin}, and the newer choice stands`
+      );
+    }
+  } catch (err: unknown) {
+    console.error(
+      `✗ could not restore the embedding pin — the ${EMBEDDING_PIN_MARKER} feature flag records it; the next run puts it back, or set ai_orchestration_settings."activeEmbeddingModelId" by hand`,
+      err
+    );
+    process.exitCode = 1;
+  }
+}
+
 async function main(): Promise<void> {
   if (!(await dbReachable())) {
     console.log('smoke:tenancy-isolation skipped — no database reachable.');
@@ -671,8 +829,39 @@ async function main(): Promise<void> {
   /** Receipts [18]'s erasures write: keyed by a subject id, with no FK, so nothing cascades them. */
   const erasureReceiptIds: string[] = [];
   const tagSlug = `${PREFIX}-tag-${stamp}`;
+  // A Ctrl-C or a SIGTERM skips `finally`, so the pin goes back here too
+  // before the process exits; the marker covers a SIGKILL (#1144).
+  const onSignal = (signal: NodeJS.Signals) => {
+    console.error(`\n✗ smoke:tenancy-isolation interrupted (${signal})`);
+    void restoreEmbeddingPinAndReport().finally(() => process.exit(1));
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
 
   try {
+    // ── The install's embedding pin, the run's own for the run ────────────
+    // The embedder takes a pinned model as the operator's explicit choice and
+    // never reroutes it, so with the operator's pin set both orgs' embedding
+    // calls go to the pinned provider, which their policy (only the local
+    // provider below) rightly refuses. The run clears it and pins a model on
+    // the local provider instead, which `interceptEmbeddings` answers: no
+    // vendor call. The fallback chain cannot do this: it never picks a local
+    // provider (t-1011). The pin is install-wide for the run's length, one more
+    // reason this smoke runs on a throwaway database only. A pin an earlier,
+    // killed run left goes back first.
+    const stranded = await restoreEmbeddingPin();
+    if (stranded) {
+      console.log(
+        stranded.restored
+          ? `restored the embedding pin (${stranded.pin}) an interrupted run left cleared`
+          : `dropped an interrupted run's record of the embedding pin (${stranded.pin}): the pin has been set since (${stranded.current})`
+      );
+    }
+    const clearedPin = await clearEmbeddingPin();
+    if (clearedPin) {
+      console.log(`cleared the install's embedding pin (${clearedPin}) for the run`);
+    }
+
     // ── Global fixtures: a local embedding provider, a tag, a capability ────
     // AiProviderConfig and KnowledgeTag are global tables (no orgId); the
     // capability is one the seed shipped.
@@ -686,6 +875,30 @@ async function main(): Promise<void> {
         isActive: true,
       },
     });
+    const localModel = await prisma.aiProviderModel.create({
+      data: {
+        slug: LOCAL_EMBEDDING_MODEL_SLUG,
+        providerSlug: LOCAL_PROVIDER_SLUG,
+        modelId: EMBEDDING_MODEL,
+        name: `${PREFIX} local embeddings`,
+        description: 'smoke:tenancy-isolation — the run pins it, then deletes it',
+        capabilities: ['embedding'],
+        tierRole: 'embedding',
+        reasoningDepth: 'none',
+        latency: 'fast',
+        costEfficiency: 'very_high',
+        contextLength: 'n_a',
+        toolUse: 'none',
+        bestRole: 'Local embeddings',
+        dimensions: DIMENSIONS,
+        isActive: true,
+        local: true,
+      },
+    });
+    check(
+      await pinLocalEmbeddingModel(localModel.id),
+      'pinned the run’s local embedding model (the fallback chain never picks a local provider)'
+    );
     const tag = await prisma.knowledgeTag.create({ data: { slug: tagSlug, name: tagSlug } });
     const capability = await prisma.aiCapability.findFirst({ select: { id: true, slug: true } });
     if (!capability) throw new Error('no seeded capability — run the seed first');
@@ -1528,6 +1741,127 @@ async function main(): Promise<void> {
     const mcpResult = await authenticateMcpRequest(mcpKey.plaintext, '10.0.0.1', 'smoke');
     check(mcpResult?.orgId === b.orgId, 'authenticateMcpRequest, as nobody, answers B');
     check(getTenantContext() === null, 'the resolvers hand the org back without entering it');
+
+    // ── [8b] Organisations' own AI keys (§137 t-1044) ──────────────────────
+    // Each org saves its own key for the provider both are approved for. As
+    // the restricted role with the policy forced: each resolves its own key
+    // and only its own, neither can read or change the other's row, and B's
+    // export carries neither the key nor its envelope.
+    console.log("\n[8b] organisations' own AI keys: each org's, and only its own");
+    if (!isSealedSecretKeyConfigured()) {
+      check(
+        false,
+        'a sealed-secret master key is configured (set SEALED_SECRET_KEYS and SEALED_SECRET_ACTIVE_KEY for this run)'
+      );
+    } else {
+      const keyA = `sk-${PREFIX}-a-${stamp}-${'a'.repeat(24)}`;
+      const keyB = `sk-${PREFIX}-b-${stamp}-${'b'.repeat(24)}`;
+      const switchBefore = await runAsSystem('smoke: read the org-keys switch', async () =>
+        prisma.aiOrchestrationSettings.findUnique({
+          where: { slug: 'global' },
+          select: { orgProviderKeysEnabled: true },
+        })
+      );
+      const setSwitch = (on: boolean) =>
+        runAsSystem('smoke: set the org-keys switch', async () => {
+          await prisma.aiOrchestrationSettings.updateMany({
+            where: { slug: 'global' },
+            data: { orgProviderKeysEnabled: on },
+          });
+          invalidateOrchestrationSettingsCache();
+        });
+      try {
+        await setSwitch(true);
+        const savedA = await runAsOrg(a.orgId, () =>
+          saveOrgProviderKey({
+            providerConfigId: localProvider.id,
+            apiKey: keyA,
+            savedById: a.ownerId,
+          })
+        );
+        const savedB = await runAsOrg(b.orgId, () =>
+          saveOrgProviderKey({
+            providerConfigId: localProvider.id,
+            apiKey: keyB,
+            savedById: b.ownerId,
+          })
+        );
+        const credA = await runAsOrg(a.orgId, () => resolveProviderCredential(localProvider));
+        const credB = await runAsOrg(b.orgId, () => resolveProviderCredential(localProvider));
+        check(
+          credA.apiKey === keyA && credA.identity === `org-key:${a.orgId}:${savedA.id}:1`,
+          'A resolves its own key, under its own identity'
+        );
+        check(
+          credB.apiKey === keyB && credB.identity === `org-key:${b.orgId}:${savedB.id}:1`,
+          'B resolves its own key, under its own identity'
+        );
+
+        const seenByA = await runAsOrg(a.orgId, () =>
+          prisma.aiOrgProviderKey.findMany({ select: { id: true, orgId: true } })
+        );
+        check(
+          seenByA.length === 1 && seenByA[0].id === savedA.id,
+          `as A, the key table holds A's row and none of B's (${seenByA.length} row(s))`
+        );
+        const bByKeyAsA = await runAsOrg(a.orgId, () =>
+          prisma.aiOrgProviderKey.findUnique({
+            where: {
+              orgId_providerConfigId: { orgId: b.orgId, providerConfigId: localProvider.id },
+            },
+            select: { id: true },
+          })
+        );
+        check(bByKeyAsA === null, "as A, B's row is not found even by its unique key");
+        const changedAsA = await runAsOrg(a.orgId, () =>
+          prisma.aiOrgProviderKey.updateMany({
+            where: { orgId: b.orgId },
+            data: { hint: 'gone' },
+          })
+        );
+        const removedAsA = await runAsOrg(a.orgId, () =>
+          prisma.aiOrgProviderKey.deleteMany({ where: { id: savedB.id } })
+        );
+        check(
+          changedAsA.count === 0 && removedAsA.count === 0,
+          "as A, B's row can be neither changed nor removed"
+        );
+        forgetOrgProviderKey();
+        const credBAfter = await runAsOrg(b.orgId, () => resolveProviderCredential(localProvider));
+        check(credBAfter.apiKey === keyB, "B's key still answers after A tried to change it");
+
+        const envelopeB = await runAsSystem('smoke: read B’s envelope', async () =>
+          prisma.aiOrgProviderKey.findUniqueOrThrow({
+            where: { id: savedB.id },
+            select: { sealedKey: true },
+          })
+        );
+        const exportB = JSON.stringify(
+          await runAsOrg(b.orgId, () => exportOrgData({ orgId: b.orgId, actorUserId: b.ownerId }))
+        );
+        check(
+          exportB.includes(savedB.id) &&
+            !exportB.includes(keyB) &&
+            !exportB.includes(envelopeB.sealedKey),
+          "B's export lists its key row, with neither the key nor its envelope"
+        );
+      } finally {
+        // Removed before the switch goes back: an org holding a key while the
+        // switch is off is refused, by design, and every later section calls
+        // this provider as A and B.
+        for (const org of [a, b]) {
+          await runAsOrg(org.orgId, () => removeOrgProviderKey(localProvider.id));
+        }
+        await setSwitch(switchBefore?.orgProviderKeysEnabled === true);
+      }
+      const credAAfterRemoval = await runAsOrg(a.orgId, () =>
+        resolveProviderCredential(localProvider)
+      );
+      check(
+        credAAfterRemoval.identity === '',
+        'with its key removed, A is back on the install’s credential'
+      );
+    }
 
     // ── The inbound route, as nobody, for B's workflow ─────────────────────
     console.log("\n[9] the inbound route fires B's trigger and runs inside B");
@@ -3584,7 +3918,7 @@ async function main(): Promise<void> {
       for (let i = 0; i < 40; i++) {
         const row = await prisma.aiAdminAuditLog.findFirst({
           where: { entityName },
-          select: { id: true, supportGrantId: true, supportOrgId: true },
+          select: { id: true, supportGrantId: true, supportOrgId: true, actingOrgId: true },
         });
         if (row) return row;
         await new Promise((r) => setTimeout(r, 50));
@@ -3651,6 +3985,33 @@ async function main(): Promise<void> {
         aNamesBsGrant.total === 0 &&
         !aReadsAll.entries.some((e) => e.id === supportRow?.id),
       `A naming B’s grant reads nothing (${aNamesBsGrant.total}), and A’s own list holds none of B’s`
+    );
+
+    // ── [19e] Every audit row names the org it was made in, read back by that org only (t-1005)
+    console.log('\n[19e] org audit history: rows name their org, and only B reads B’s back');
+    check(
+      supportRow?.actingOrgId === b.orgId && memberRow?.actingOrgId === b.orgId,
+      `the support row and B’s owner’s own row both name B (${supportRow?.actingOrgId}, ${memberRow?.actingOrgId})`
+    );
+    const history = (orgId: string) =>
+      runAsOrg(orgId, () => listOrgAuditLog(orgId, { page: 1, limit: 100 }), {
+        source: 'session',
+        role: ORG_OWNER_ROLE,
+      });
+    const bHistory = await history(b.orgId);
+    const bHistoryIds = new Set(bHistory.entries.map((e) => e.id));
+    check(
+      bHistoryIds.has(supportRow?.id ?? '') &&
+        bHistoryIds.has(memberRow?.id ?? '') &&
+        bHistory.entries.find((e) => e.id === supportRow?.id)?.support?.grantId === adminGrant.id &&
+        bHistory.entries.find((e) => e.id === memberRow?.id)?.support === null,
+      `B reads both rows back, the support one marked with its grant (${bHistory.total} rows)`
+    );
+    const aHistory = await history(a.orgId);
+    check(
+      bHistory.total > 0 &&
+        !aHistory.entries.some((e) => e.id === supportRow?.id || e.id === memberRow?.id),
+      `A’s history holds neither of B’s rows (${aHistory.total} rows of its own)`
     );
 
     // ── [20] Org erasure: from inside another org, with knowledge documents ─
@@ -3728,7 +4089,7 @@ async function main(): Promise<void> {
     const supportRowAfterErasure = await runAsSystem('smoke: read the support audit row', () =>
       prisma.aiAdminAuditLog.findFirst({
         where: { entityName: supportAction },
-        select: { supportGrantId: true, supportOrgId: true },
+        select: { supportGrantId: true, supportOrgId: true, actingOrgId: true },
       })
     );
     check(
@@ -3736,11 +4097,28 @@ async function main(): Promise<void> {
         supportRowAfterErasure.supportOrgId === b.orgId,
       `after B’s erasure, its support audit row stays, marked as support in B (${JSON.stringify(supportRowAfterErasure)})`
     );
+    // t-1005: erasing B keeps the org on the rows made in it, member rows too.
+    const memberRowAfterErasure = await runAsSystem('smoke: read the member audit row', () =>
+      prisma.aiAdminAuditLog.findFirst({
+        where: { entityName: memberAction },
+        select: { actingOrgId: true },
+      })
+    );
+    check(
+      supportRowAfterErasure?.actingOrgId === b.orgId &&
+        memberRowAfterErasure?.actingOrgId === b.orgId,
+      `after B’s erasure, its audit rows still name B (${supportRowAfterErasure?.actingOrgId}, ${memberRowAfterErasure?.actingOrgId})`
+    );
 
     if (failures > 0) throw new Error(`${failures} check(s) failed`);
-    console.log('\n✓ smoke:tenancy-isolation passed');
   } finally {
     restoreFetch();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    // The pin goes back first and on its own, so a cleanup that fails below
+    // cannot leave the install unpinned. A pin that cannot be put back fails
+    // the run, as a failed cleanup does.
+    await restoreEmbeddingPinAndReport();
     // Everything this smoke creates carries the prefix, and an org's
     // tenant-owned rows cascade with it — so a run that died half-way
     // through seeding (a dropped policy refuses the first create) leaves
@@ -3760,7 +4138,10 @@ async function main(): Promise<void> {
       await prisma.aiAgentProfile.deleteMany({ where: { slug: { startsWith: `${PREFIX}-` } } });
       await prisma.aiProviderConfig.deleteMany({ where: { slug: { startsWith: `${PREFIX}-` } } });
       await prisma.aiProviderModel.deleteMany({ where: { slug: { startsWith: `${PREFIX}-` } } });
-      await prisma.featureFlag.deleteMany({ where: { name: { startsWith: 'SMOKE_ISO_' } } });
+      // Not the pin marker: a restore that failed above leaves it for the next run.
+      await prisma.featureFlag.deleteMany({
+        where: { name: { startsWith: 'SMOKE_ISO_', not: EMBEDDING_PIN_MARKER } },
+      });
       if (mcpExposureCapabilityId) {
         if (mcpExposure) {
           await prisma.mcpExposedTool.update({
@@ -3783,6 +4164,9 @@ async function main(): Promise<void> {
     });
     await prisma.$disconnect();
   }
+  // Only after the teardown: a pin or a cleanup that failed there fails the
+  // run, and a "passed" printed before it would read as success.
+  if (process.exitCode !== 1) console.log('\n✓ smoke:tenancy-isolation passed');
 }
 
 main().catch((err: unknown) => {

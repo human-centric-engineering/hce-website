@@ -70,6 +70,7 @@ const PROVIDERS = [
     timeoutMs: null,
     maxRetries: null,
     jurisdiction: null,
+    trustedForConfidential: false,
   },
   {
     id: 'prov-openai',
@@ -87,6 +88,7 @@ const PROVIDERS = [
     timeoutMs: null,
     maxRetries: null,
     jurisdiction: null,
+    trustedForConfidential: false,
   },
 ];
 
@@ -157,6 +159,9 @@ function makeAgent(model: string, provider: string = 'openai') {
     inputGuardMode: null,
     outputGuardMode: null,
     citationGuardMode: null,
+    privacyMode: null,
+    privacyConfidentialPersonal: null,
+    privacyConfidentialCommercial: null,
     rateLimitRpm: null,
     knowledgeCategories: [],
     knowledgeAccessMode: 'full',

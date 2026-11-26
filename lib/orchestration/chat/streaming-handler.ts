@@ -20,7 +20,8 @@
  *   is surfaced as a final `{ type: 'error' }` event.
  */
 
-import type { AiAgent, AiAgentProfile, AiConversation, AiMessage, Prisma } from '@/types/prisma';
+import { Prisma } from '@prisma/client';
+import type { AiAgent, AiAgentProfile, AiConversation, AiMessage } from '@/types/prisma';
 import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/logging';
 import { keepRunningAfterResponse } from '@/lib/api/after-response';
@@ -31,6 +32,7 @@ import type {
   MessageMetadata,
   MessageProvenance,
   PendingApproval,
+  PrivacySummary,
   SideEffectModelUsage,
   ToolCallTrace,
 } from '@/types/orchestration';
@@ -53,14 +55,24 @@ import {
   getProviderWithFallbacks,
   getProviderIfBreakerClosed,
   isLocalProvider,
+  providerUsesOrgOwnKey,
+  usesOrgOwnKey,
   type AttachmentCapability,
 } from '@/lib/orchestration/llm/provider-manager';
 import { fallbackCallContext } from '@/lib/orchestration/llm/provider-eligibility';
 import { resolveAgentProviderAndModel } from '@/lib/orchestration/llm/agent-resolver';
+import {
+  keepFlaggedGroups,
+  readFlaggedGroups,
+  routeConfidentialTurn,
+  type ConfidentialRoute,
+} from '@/lib/orchestration/llm/confidential-route';
 import { resolveEffectivePrompt } from '@/lib/orchestration/agents/resolve-effective-prompt';
 import { touchAgentLastActive } from '@/lib/orchestration/agents/touch-last-active';
 import {
   isRequestFault,
+  PRIVACY_BLOCKED,
+  PRIVACY_CONFIDENTIAL,
   ProviderError,
   SPEND_CAP_CODES,
   type LlmProvider,
@@ -113,7 +125,21 @@ import {
   LATEST_AGENT_VERSION_ID_INCLUDE,
   readAgentConsistently,
 } from '@/lib/orchestration/agents/agent-versioning';
-import { buildMessagesAndBreakdown } from '@/lib/orchestration/chat/message-builder';
+import {
+  buildMessagesAndBreakdown,
+  isLeftOutOfHistory,
+} from '@/lib/orchestration/chat/message-builder';
+import { PrivacyRefusedError } from '@/lib/orchestration/llm/privacy-stage';
+import {
+  placePrivacyRefusal,
+  privacyRefusalKind,
+  type BuiltChatRequest,
+  type PrivacyRefusalKind,
+  type PlacedPrivacyRefusal,
+  type SentMemory,
+} from '@/lib/orchestration/chat/privacy-refusal';
+import { isJsonObject } from '@/lib/privacy/config-recipients';
+import { SENSITIVITY_GROUPS, type SensitivityGroup } from '@/lib/privacy/adapters/types';
 import { estimateTokens } from '@/lib/orchestration/chat/token-estimator';
 import {
   countOpenAiToolDefinitionTokens,
@@ -130,7 +156,17 @@ import {
   splitGapNote,
   withGapNote,
 } from '@/lib/orchestration/chat/summarizer';
+import { randomUUID } from 'node:crypto';
 import { isEmbedUserId, userIdForUserRef } from '@/lib/embed/auth';
+import { userKnownValues } from '@/lib/orchestration/privacy/known-values';
+import {
+  bindPrivacyScope,
+  createPrivacyScope,
+  currentPrivacyScope,
+  privacySummary,
+  withPrivacyScope,
+  type PrivacyScope,
+} from '@/lib/orchestration/privacy/scope';
 import { hintScope } from '@/lib/orchestration/scope';
 import {
   GEN_AI_OPERATION_NAME,
@@ -353,6 +389,12 @@ function rowsAfterPin(pin: HistoryPin) {
   };
 }
 
+/**
+ * What a turn built its first call from, the summary pin it read (t-1017), and
+ * the agent whose memories it sent (t-1018).
+ */
+type BuiltTurnRequest = BuiltChatRequest & { summaryPin: string | null; agentId: string };
+
 /** What a read from the pin returns. */
 interface HistoryFromPin {
   rows: AiMessage[];
@@ -433,6 +475,44 @@ interface WriteEvaluationLogParams {
   metadata?: { citations?: Citation[] };
 }
 
+/** The `warning` event codes for a `warn` confidential-content policy's note (§130). */
+export const CONFIDENTIAL_NOTE_CODES = {
+  personal: 'confidential_personal',
+  commercial: 'confidential_commercial',
+} as const satisfies Record<SensitivityGroup, string>;
+
+/** The `warning` event code for the note that a conversation moved (§130 t-1038). */
+export const CONFIDENTIAL_MOVED_CODE = 'confidential_moved';
+
+/**
+ * What it says, by where it moved. Never what was found. Shown once per
+ * conversation: later turns stay on the model it moved to.
+ */
+export const CONFIDENTIAL_MOVED_NOTES: Record<'local' | 'trusted', string> = {
+  local:
+    'This conversation includes confidential information, so it is now answered by an AI model your organisation runs itself.',
+  trusted:
+    'This conversation includes confidential information, so it is now answered by an AI provider your organisation trusts with it.',
+};
+
+/** What the note says. Never what was found: a group, and that it went to the provider. */
+export const CONFIDENTIAL_NOTES: Record<SensitivityGroup, string> = {
+  personal:
+    'This conversation includes sensitive personal information, such as a health or HR matter. It was sent to the AI provider, as this deployment allows. Share only what the assistant needs.',
+  commercial:
+    'This conversation includes confidential business information, such as unannounced plans or a deal. It was sent to the AI provider, as this deployment allows. Share only what the assistant needs.',
+};
+
+/**
+ * The turn's privacy counts (§127) as a metadata field, for whichever
+ * assistant message ends the turn: the answer, a pause for approval, a
+ * cost-cap stop or an error marker. Empty when the layer scanned no call.
+ */
+function privacyField(scope: PrivacyScope): { privacy?: PrivacySummary } {
+  const summary = privacySummary(scope);
+  return summary ? { privacy: summary } : {};
+}
+
 export class StreamingChatHandler {
   /**
    * Per-instance sequence cache for AiEvaluationLog writes. Set lazily on
@@ -467,21 +547,58 @@ export class StreamingChatHandler {
     // contract (the iterator yields error events; never rejects).
     //
     // `withPaidCallHold` gives the turn its own hold on paid calls, which the
-    // turn sets if it goes on, on a local model, past a reached budget cap.
-    // From then the provider gate refuses every paid call the turn makes —
-    // tools, the summarizer and embeddings as well as the main stream.
+    // turn sets as soon as it finds a budget cap reached, whether it then goes
+    // on (on a local model, or on the org's own key) or is refused. From then
+    // the provider gate refuses every paid call the turn makes on the
+    // platform's keys — tools, the summarizer and embeddings as well as the
+    // main stream — and, once the agent's own cap is reached, on the org's
+    // own key too.
     const hold: PaidCallHold = { cap: null };
+    // `withPrivacyScope` gives every provider call the turn makes — the main
+    // stream, tools, the summarizer, embeddings — the turn's privacy scope
+    // (§127): its agent, its user's known values, and the tally the terminal
+    // assistant message records. The conversation and agent are bound once
+    // `runInner` has loaded them; no provider call is made before that.
+    //
+    // A turn started inside other work — a workflow step's `judge_call`, or
+    // an agent another agent called — sits inside that work's scope, so its
+    // calls are counted there too, on the step's trace or the outer turn's
+    // message.
+    const privacyScope = createPrivacyScope(
+      {
+        scopeId: request.conversationId
+          ? `conversation:${request.conversationId}`
+          : `turn:${randomUUID()}`,
+        userId: request.userId,
+        loadKnownValues: userKnownValues(request.userId),
+      },
+      currentPrivacyScope()
+    );
+    // The conversation the turn's `warn` note is kept on, once `runInner` has
+    // loaded it, as its owner's.
+    const noted: NoteTarget = { conversationId: null, movedTo: null };
+    const log = turnLogger(request);
     yield* withPaidCallHold(
       hold,
-      withSpanGenerator(
-        SPAN_CHAT_TURN,
-        {
-          [GEN_AI_OPERATION_NAME]: 'chat',
-          [SUNRISE_USER_ID]: request.userId,
-          [SUNRISE_AGENT_SLUG]: request.agentSlug,
-        },
-        (chatSpan) => this.runInner(chatSpan, request, hold),
-        { manualStatus: true }
+      withPrivacyScope(
+        privacyScope,
+        withSpanGenerator(
+          SPAN_CHAT_TURN,
+          {
+            [GEN_AI_OPERATION_NAME]: 'chat',
+            [SUNRISE_USER_ID]: request.userId,
+            [SUNRISE_AGENT_SLUG]: request.agentSlug,
+          },
+          (chatSpan) =>
+            this.withConfidentialNotes(
+              this.runInner(chatSpan, request, hold, privacyScope, noted, log),
+              privacyScope,
+              request.userId,
+              noted,
+              log
+            ),
+          { manualStatus: true }
+        )
       )
     );
   }
@@ -498,12 +615,11 @@ export class StreamingChatHandler {
   private async *runInner(
     chatSpan: Span,
     request: ChatRequest,
-    hold: PaidCallHold
+    hold: PaidCallHold,
+    privacyScope: PrivacyScope,
+    noted: NoteTarget,
+    log: typeof logger
   ): AsyncGenerator<ChatEvent, void, unknown> {
-    const log =
-      request.requestId || request.visitorId
-        ? logger.withContext({ requestId: request.requestId, visitorId: request.visitorId })
-        : logger;
     let conversationId: string | null = null;
     let resolvedProviderSlug: string | null = null;
     // The latest AiAgentVersion at turn start, stamped on the turn's user and
@@ -518,17 +634,76 @@ export class StreamingChatHandler {
     // The agent and its latest budget reading, for the `budget_exceeded`
     // webhook when a spend cap ends the turn from inside the provider gate.
     let budgetNotice: { agent: BudgetNoticeAgent; budget: BudgetStatus } | null = null;
+    // Every row this turn persists, so a turn the privacy layer refuses under
+    // `block` can leave all of them out of later history (§127 t-1014). Out
+    // here so the catch below sees them. The error marker is not one: every
+    // reader leaves error markers out already (`isLeftOutOfHistory`).
+    const turnRowIds: string[] = [];
+    const persistTurnRow = async (params: PersistMessageParams): Promise<AiMessage> => {
+      const row = await this.persistMessage(params);
+      turnRowIds.push(row.id);
+      return row;
+    };
+    // What the turn built its request from, and the summary pin it read, so a
+    // refusal under `block` can tell which part held the details (t-1017).
+    let builtRequest: BuiltTurnRequest | null = null;
+    // How many messages the turn's own chat call carried when the privacy
+    // stage refused it. Set only there: another call's location is not a
+    // position in these messages.
+    let refusedCallMessageCount: number | null = null;
+    // Persist an error-marker assistant message so the conversation has no
+    // orphaned user message with no response — the user's turn was written
+    // up front, so returning without this leaves a question that reloads
+    // with no answer at all. Clients detect the marker via
+    // `metadata.error === true`. The catch below calls it for a thrown
+    // failure; an in-try ending goes through `endWithError`, below.
+    // The marker holds fixed text only, never a blocked reply.
+    const persistErrorMarker = async (errorCode: string): Promise<void> => {
+      if (!conversationId) return;
+      try {
+        await this.persistMessage({
+          conversationId,
+          role: 'assistant',
+          content: '[An error occurred and the response could not be completed.]',
+          agentVersionId,
+          // Pin provider only. modelId stays null on every error marker,
+          // the in-try endings' included, so all markers read alike; the
+          // audit trail reads that as "model in effect at error time was
+          // ambiguous (possibly mid-fallback)".
+          ...(resolvedProviderSlug ? { providerSlug: resolvedProviderSlug } : {}),
+          metadata: { error: true, errorCode, ...privacyField(privacyScope) },
+        });
+      } catch (persistErr) {
+        log.warn('Failed to persist error-marker assistant message', {
+          conversationId,
+          error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+        });
+      }
+    };
+    // Every in-try ending after the user's message is saved —
+    // `yield await endWithError(code, message); return;` — so the marker is
+    // saved BEFORE the error is yielded: a client that stops reading at the
+    // error (the embed widget does) must still leave the row saved (t-1040).
+    // Never yield `errorEvent` directly once the user's message exists.
+    const endWithError = async (code: string, message: string): Promise<ChatEvent> => {
+      await persistErrorMarker(code);
+      return errorEvent(code, message);
+    };
+
     try {
       registerBuiltInCapabilities();
 
       const agent = await this.loadAgent(request.agentSlug);
       agentVersionId = agent.versions[0]?.id;
+      bindPrivacyScope(privacyScope, { agentId: agent.id });
       // Resolve provider + model once. Empty agent.provider/agent.model fall
       // back to the active provider with a key set + the system default-model
       // map; explicit values pass through unchanged.
-      const resolvedBinding = await resolveAgentProviderAndModel(agent, 'chat');
-      const resolvedModel = resolvedBinding.model;
-      const resolvedFallbackProviders = resolvedBinding.fallbacks;
+      // `let`: a turn holding confidential content may move to the model for
+      // confidential messages once its history is read (§130 t-1038, below).
+      let resolvedBinding = await resolveAgentProviderAndModel(agent, 'chat');
+      let resolvedModel = resolvedBinding.model;
+      let resolvedFallbackProviders = resolvedBinding.fallbacks;
       setSpanAttributes(chatSpan, {
         [SUNRISE_AGENT_ID]: agent.id,
         [GEN_AI_REQUEST_MODEL]: resolvedModel,
@@ -540,41 +715,106 @@ export class StreamingChatHandler {
       const budget = await withAgentBudgetLock(agent.id, () => checkBudget(agent.id));
       budgetNotice = { agent, budget };
 
-      // Budget warning at 80%
-      if (
-        budget.withinBudget &&
-        budget.limit !== null &&
-        budget.limit > 0 &&
-        budget.spent / budget.limit >= 0.8
-      ) {
-        const pct = ((budget.spent / budget.limit) * 100).toFixed(0);
-        log.warn('Agent approaching budget limit', {
-          agentId: agent.id,
-          spent: budget.spent,
-          limit: budget.limit,
-          percent: pct,
-        });
-        yield {
-          type: 'warning',
-          code: 'budget_warning',
-          message: `This agent has used ${pct}% of its $${budget.limit.toFixed(2)} monthly budget.`,
-        };
+      // A cap that has been reached stops paid calls, not free ones: a cap of 0
+      // means "no paid calls", and a turn that can be answered without one is.
+      // From here the turn holds paid calls (`hold`), and the provider gate
+      // refuses each one it would make — a fallback, a failover mid-stream, a
+      // tool, the summarizer. (The org and global caps are enforced at the gate
+      // in any case; the agent's cap is known only here.) A call on the org's
+      // own key is held by its agent's cap alone (§137).
+      //
+      // Whether the turn can be answered at all waits for `capsEndTurn`, once
+      // confidential routing has said where it goes.
+      if (!budget.withinBudget) {
+        hold.cap = budgetRefusal(budget).cap;
+        hold.agentCapReached = budget.agentCapExceeded === true;
       }
 
-      // A cap that has been reached stops paid calls, not free ones: an agent
-      // whose primary is local still answers on it, and a cap of 0 means "no
-      // paid calls". The turn holds paid calls instead (`hold`), and the
-      // provider gate refuses each one it would make — a fallback, a failover
-      // mid-stream, a tool, the summarizer. (The org and global caps are
-      // enforced at the gate in any case; the agent's cap is known only here.)
-      if (!budget.withinBudget && (await isLocalProvider(resolvedBinding.providerSlug))) {
-        hold.cap = budgetRefusal(budget).cap;
-      } else if (!budget.withinBudget) {
-        const refusal = budgetRefusal(budget);
-        yield errorEvent(refusal.code, refusal.message);
-        notifyBudgetExceeded({ agent, budget, cap: refusal.cap, request, conversationId });
-        return;
+      // The cap that refuses a paid call to `slug` now, as the provider gate
+      // answers it under the hold above, or null when the call may go: a local
+      // provider is never refused, and one on the org's own key only by the
+      // agent's cap, since the vendor bills the org (§137). Asked ahead of any
+      // call, so quietly, and once per provider for the turn.
+      const capAnswers = new Map<string, Promise<BudgetRefusalReason | null>>();
+      const capRefusalFor = (slug: string): Promise<BudgetRefusalReason | null> => {
+        const known = capAnswers.get(slug);
+        if (known) return known;
+        const answer = (async () => {
+          const isLocal = await isLocalProvider(slug);
+          const ownKey = !isLocal && (await providerUsesOrgOwnKey(slug));
+          const refused = await spendCapRefusal(slug, isLocal, { ownKey, quiet: true });
+          if (!refused) return null;
+          const code = SPEND_CAP_CODES[refused.cap];
+          return { code, cap: refused.cap, message: refusalText(code) };
+        })();
+        capAnswers.set(slug, answer);
+        return answer;
+      };
+
+      // Refused here, before anything is read or saved, when routing cannot
+      // change the answer: the agent's provider is refused, and so would the
+      // model for confidential messages be, or there is none. Otherwise the
+      // turn is decided once it is routed (`capsEndTurn`).
+      if (!budget.withinBudget) {
+        const refusal = await capRefusalFor(resolvedBinding.providerSlug);
+        if (refusal) {
+          const target = (await getOrchestrationSettings()).confidentialModel ?? null;
+          if (target === null || (await capRefusalFor(target.providerSlug))) {
+            yield errorEvent(refusal.code, refusal.message);
+            notifyBudgetExceeded({ agent, budget, cap: refusal.cap, request, conversationId });
+            return;
+          }
+        }
       }
+
+      // Whether a reached cap ends the turn, asked once the turn is routed
+      // (§137 t-1057) of the provider it is bound for: the agent's, or the
+      // model for confidential messages it was moved to. Refused here, before
+      // anything is saved or sent, if the gate would refuse that provider.
+      //
+      // Fallbacks are not asked. Chat sends whichever provider serves the turn
+      // the bound model's id, which a local model or another vendor does not
+      // serve: a turn let in on one would fail after its message was saved,
+      // where the refusal says what happened (t-1059).
+      //
+      // Yields the 80% warning for a turn that goes on; returns true when the
+      // turn has ended.
+      const capsEndTurn = async function* (binding: {
+        providerSlug: string;
+      }): AsyncGenerator<ChatEvent, boolean> {
+        const agentCapReached = budget.agentCapExceeded === true;
+        if (!budget.withinBudget) {
+          const refusal = await capRefusalFor(binding.providerSlug);
+          if (refusal) {
+            yield errorEvent(refusal.code, refusal.message);
+            notifyBudgetExceeded({ agent, budget, cap: refusal.cap, request, conversationId });
+            return true;
+          }
+        }
+
+        // Budget warning at 80%, for a turn that goes on with its agent's cap
+        // not yet reached.
+        if (
+          !agentCapReached &&
+          budget.limit !== null &&
+          budget.limit > 0 &&
+          budget.spent / budget.limit >= 0.8
+        ) {
+          const pct = ((budget.spent / budget.limit) * 100).toFixed(0);
+          log.warn('Agent approaching budget limit', {
+            agentId: agent.id,
+            spent: budget.spent,
+            limit: budget.limit,
+            percent: pct,
+          });
+          yield {
+            type: 'warning',
+            code: 'budget_warning',
+            message: `This agent has used ${pct}% of its $${budget.limit.toFixed(2)} monthly budget.`,
+          };
+        }
+        return false;
+      };
 
       // Resolve the effective per-turn cost cap lazily.
       //
@@ -711,38 +951,65 @@ export class StreamingChatHandler {
         // attachment capability the request needs. Vision and documents
         // are intrinsic chat-model capabilities (no fallback model), so
         // a mismatch is a configuration error the user must resolve.
-        const requiredCapabilities: AttachmentCapability[] = [];
-        if (hasImageAttachments) requiredCapabilities.push('vision');
-        if (hasPdfAttachments) requiredCapabilities.push('documents');
-        try {
-          await assertModelSupportsAttachments(
-            resolvedBinding.providerSlug,
-            resolvedModel,
-            requiredCapabilities
-          );
-        } catch (err) {
-          if (err instanceof ProviderError && err.code === 'CAPABILITY_NOT_SUPPORTED') {
-            if (hasImageAttachments && !hasPdfAttachments) {
-              yield errorEvent(
-                'IMAGE_NOT_SUPPORTED',
-                "This agent's model can't process images. Switch the model to one with vision support."
-              );
-            } else if (hasPdfAttachments && !hasImageAttachments) {
-              yield errorEvent(
-                'PDF_NOT_SUPPORTED',
-                "This agent's model can't process PDFs. Switch the model to one with document support."
-              );
-            } else {
-              yield errorEvent(
-                'IMAGE_NOT_SUPPORTED',
-                "This agent's model can't process all of the attached files. Switch the model or remove unsupported attachments."
-              );
-            }
-            return;
-          }
-          throw err;
+        const unsupported = await attachmentGateError(
+          resolvedBinding.providerSlug,
+          resolvedModel,
+          hasImageAttachments,
+          hasPdfAttachments,
+          "This agent's model"
+        );
+        if (unsupported) {
+          yield unsupported;
+          return;
         }
       }
+
+      // The model for confidential messages (§130 t-1038). A turn whose
+      // agent's provider a group's policy does not permit for what the
+      // conversation holds is answered on it instead: chosen before anything
+      // is built from the binding, so the history budget, the summariser, the
+      // cost log and the trace all use the model that answers. The stage
+      // cannot do it: by then the provider and model are fixed, and a
+      // fallback is sent the primary's model id. Before the user's message is
+      // saved, so a turn the new model cannot serve ends without leaving it
+      // unanswered. Returns the error that ends the turn when the moved model
+      // cannot read the turn's attachments (the gate above asked about the
+      // agent's).
+      const routeTurn = async (
+        history: readonly AiMessage[],
+        metadata: Prisma.JsonValue | null
+      ): Promise<{ route: ConfidentialRoute; unsupported: ChatEvent | null }> => {
+        const routed = await routeConfidentialTurn({
+          binding: resolvedBinding,
+          messages: [
+            ...history.map((m) => ({ role: m.role, content: m.content })),
+            { role: isOpeningTurn ? 'system' : 'user', content: turnText },
+          ],
+          sticky: readFlaggedGroups(metadata),
+          ...(request.signal ? { signal: request.signal } : {}),
+        });
+        const unsupported =
+          routed.kind === 'move'
+            ? await attachmentGateError(
+                routed.binding.providerSlug,
+                routed.binding.model,
+                hasImageAttachments,
+                hasPdfAttachments,
+                'The model for confidential messages'
+              )
+            : null;
+        return { route: routed, unsupported };
+      };
+      // A new conversation has no history and nothing kept on it, so it is
+      // routed before it is created: a turn its moved model cannot serve then
+      // creates nothing, as the gate above.
+      let routing = request.conversationId ? null : await routeTurn([], null);
+      if (routing?.unsupported) {
+        yield routing.unsupported;
+        return;
+      }
+      // …and so is a reached cap's say on it: a refused turn creates nothing.
+      if (routing && (yield* capsEndTurn(routing.route.binding))) return;
 
       // Load cap settings once — used for conversation and message limits.
       const capSettings = await prisma.aiOrchestrationSettings.findUnique({
@@ -756,6 +1023,8 @@ export class StreamingChatHandler {
         capSettings?.maxConversationsPerUser ?? null
       );
       conversationId = conversation.id;
+      noted.conversationId = conversation.id;
+      bindPrivacyScope(privacyScope, { scopeId: `conversation:${conversation.id}` });
       setSpanAttributes(chatSpan, { [SUNRISE_CONVERSATION_ID]: conversation.id });
       // The stored summary, if there is a usable one. A pin with no text behind
       // it covers nothing, whatever it says — and neither does a pin behind the
@@ -797,7 +1066,18 @@ export class StreamingChatHandler {
         omittedBeforeHistory = read.omitted;
       }
 
-      // Enforce message-per-conversation cap using actual DB count
+      if (!routing) {
+        routing = await routeTurn(history, conversation.metadata);
+        if (routing.unsupported) {
+          yield routing.unsupported;
+          return;
+        }
+        if (yield* capsEndTurn(routing.route.binding)) return;
+      }
+
+      // Enforce message-per-conversation cap using actual DB count, after a
+      // reached budget cap has had its say, so that refusal (and its webhook)
+      // is not pre-empted by this one
       // (a history read returns at most HISTORY_LOAD_LIMIT rows, so
       // history.length can't detect conversations that exceed it).
       const maxMessages = capSettings?.maxMessagesPerConversation ?? null;
@@ -816,6 +1096,25 @@ export class StreamingChatHandler {
         }
       }
 
+      const { route } = routing;
+      await keepFlaggedGroups(
+        { id: conversation.id, ...conversationOwner(request.userId) },
+        route.found,
+        conversation.metadata
+      );
+      resolvedBinding = route.binding;
+      resolvedModel = route.binding.model;
+      resolvedFallbackProviders = route.binding.fallbacks;
+      if (route.kind === 'move') {
+        noted.movedTo = route.to;
+        setSpanAttributes(chatSpan, { [GEN_AI_REQUEST_MODEL]: resolvedModel });
+        log.info('Chat turn moved to the model for confidential messages', {
+          agentSlug: request.agentSlug,
+          conversationId: conversation.id,
+          provider: resolvedBinding.providerSlug,
+        });
+      }
+
       // Persist the user message up front so a mid-stream crash still
       // leaves an audit trail.
       //
@@ -825,7 +1124,7 @@ export class StreamingChatHandler {
       // message-builder instead.
       const userMessage = isOpeningTurn
         ? null
-        : await this.persistMessage({
+        : await persistTurnRow({
             conversationId: conversation.id,
             role: 'user',
             content: turnText,
@@ -834,29 +1133,6 @@ export class StreamingChatHandler {
             // never collide with a platform metadata field.
             ...(request.messageMetadata ? { metadata: { app: request.messageMetadata } } : {}),
           });
-
-      // Log a single `vision` cost row when the turn carries
-      // attachments. Fires once per turn, regardless of how the chat
-      // call ends (success / error / tool-call iteration), because the
-      // platform overhead is per-attachment, not per-completion. Per-
-      // token chat cost still rolls up under the `chat` rows downstream.
-      if (hasImageAttachments || hasPdfAttachments) {
-        const imageCount = attachments.filter((a) => a.mediaType.startsWith('image/')).length;
-        const pdfCount = attachments.filter((a) => a.mediaType === 'application/pdf').length;
-        void logCost({
-          agentId: agent.id,
-          conversationId: conversation.id,
-          userId: userIdForUserRef(request.userId),
-          model: resolvedModel,
-          provider: resolvedBinding.providerSlug,
-          inputTokens: 0,
-          outputTokens: 0,
-          operation: CostOperation.VISION,
-          imageCount,
-          pdfCount,
-          ...(request.costLogMetadata ? { metadata: request.costLogMetadata } : {}),
-        });
-      }
 
       // Mirror to the evaluation log when this chat turn is running
       // inside an evaluation session. No-op otherwise. Skipped for an opening
@@ -953,7 +1229,7 @@ export class StreamingChatHandler {
         emitGuardEvent(guardEventContext, 'input', guardMode);
 
         if (guardMode === 'block') {
-          yield errorEvent('input_blocked', 'Message blocked by security policy.');
+          yield await endWithError('input_blocked', 'Message blocked by security policy.');
           return;
         }
         if (guardMode === 'warn_and_continue') {
@@ -1039,6 +1315,12 @@ export class StreamingChatHandler {
           {
             ...(previousSummary ? { previousSummary } : {}),
             ...(resolvedBinding.provenance ? { provenance: resolvedBinding.provenance } : {}),
+            // A moved turn's summary holds what moved it: made on the model
+            // for confidential messages, not the routing default (§130 t-1038).
+            ...(route.kind === 'move' ? { model: resolvedModel } : {}),
+            // A summary stays on the conversation's provider: a routing default
+            // naming another gives way to this model (§136 t-1068).
+            conversationModel: resolvedModel,
             // The roster table in `.context/orchestration/capabilities.md`
             // names this boundary as carrying the caller's tags. It has to
             // actually carry them, or the doc is asserting something false
@@ -1135,7 +1417,8 @@ export class StreamingChatHandler {
         const rows = history.map(toHistoryRow);
         const take = Math.min(SUMMARY_CATCHUP_MESSAGES, countWithinChunkBudget(rows));
         if (take === 0) {
-          // Everything read was an error marker: nothing to summarise, nothing to
+          // Everything read was left out of history (error markers, or a
+          // privacy-refused turn's rows): nothing to summarise, nothing to
           // lose. Move the pin past them so the next read gets further.
           // Bounded like the calls are: each skip is a write and a read.
           markerSkips += 1;
@@ -1311,7 +1594,7 @@ export class StreamingChatHandler {
               where: { userId: request.userId, agentId: agent.id },
               orderBy: { updatedAt: 'desc' },
               take: 50,
-              select: { key: true, value: true },
+              select: { id: true, key: true, value: true, updatedAt: true },
             }),
         getCapabilityDefinitions(agent.id),
       ]);
@@ -1338,7 +1621,11 @@ export class StreamingChatHandler {
         agent.profile
       );
 
-      const { messages: initialMessages, breakdown: initialBreakdown } = buildMessagesAndBreakdown({
+      const {
+        messages: initialMessages,
+        sources: initialSources,
+        breakdown: initialBreakdown,
+      } = buildMessagesAndBreakdown({
         systemInstructions: resolvedPrompt.systemInstructions,
         contextBlock,
         history: historyRows,
@@ -1359,6 +1646,18 @@ export class StreamingChatHandler {
         omittedBeforeHistory,
       });
       let messages: LlmMessage[] = initialMessages;
+      builtRequest = {
+        sources: initialSources,
+        historyRows: historyRows.map((row, i) => ({
+          id: history[i].id,
+          role: row.role,
+          finishedReply:
+            row.role === 'assistant' && row.content.length > 0 && !row.toolCalls?.length,
+        })),
+        summaryPin: conversationSummary ? casPin : null,
+        agentId: agent.id,
+        memories: memoryRows.map((m) => ({ id: m.id, updatedAt: m.updatedAt })),
+      };
 
       const toolDefinitions: LlmToolDefinition[] = capabilityDefinitions.map((def) => ({
         name: def.name,
@@ -1436,6 +1735,31 @@ export class StreamingChatHandler {
       );
       resolvedProviderSlug = usedSlug;
       resolvedBreakerKey = usedBreakerKeyOrUndefined ?? usedSlug;
+
+      // Log a single `vision` cost row when the turn carries attachments,
+      // once its provider is chosen: billed with the turn's call, so on that
+      // provider's key. Fires once per turn, regardless of how the chat call
+      // ends (success / error / tool-call iteration), because the platform
+      // overhead is per-attachment, not per-completion. Per-token chat cost
+      // still rolls up under the `chat` rows downstream.
+      if (hasImageAttachments || hasPdfAttachments) {
+        const imageCount = attachments.filter((a) => a.mediaType.startsWith('image/')).length;
+        const pdfCount = attachments.filter((a) => a.mediaType === 'application/pdf').length;
+        void logCost({
+          agentId: agent.id,
+          conversationId: conversation.id,
+          userId: userIdForUserRef(request.userId),
+          model: resolvedModel,
+          provider: usedSlug,
+          ownKey: usesOrgOwnKey(provider),
+          inputTokens: 0,
+          outputTokens: 0,
+          operation: CostOperation.VISION,
+          imageCount,
+          pdfCount,
+          ...(request.costLogMetadata ? { metadata: request.costLogMetadata } : {}),
+        });
+      }
 
       // Extract responseFormat from agent metadata if configured
       const agentMetadata =
@@ -1675,6 +1999,9 @@ export class StreamingChatHandler {
                 setSpanStatus(llmSpan, { code: 'ok' });
               } catch (streamErr) {
                 streamRetries++;
+                if (streamErr instanceof PrivacyRefusedError) {
+                  refusedCallMessageCount = messages.length;
+                }
 
                 // Whatever the provider told us this failed call cost, record
                 // it — before deciding what to do about the failure, so every
@@ -1712,6 +2039,7 @@ export class StreamingChatHandler {
                     userId: userIdForUserRef(request.userId),
                     model: resolvedModel,
                     provider: resolvedProviderSlug ?? resolvedBinding.providerSlug,
+                    ownKey: usesOrgOwnKey(currentProvider),
                     inputTokens: errUsage.inputTokens,
                     outputTokens: errUsage.outputTokens,
                     cacheReadTokens: errUsage.cacheReadTokens,
@@ -1826,7 +2154,9 @@ export class StreamingChatHandler {
                     try {
                       const acquired = await getProviderIfBreakerClosed(candidate, fallbackOrigin);
                       const refusal = acquired
-                        ? await spendCapRefusal(candidate, acquired.provider.isLocal === true)
+                        ? await spendCapRefusal(candidate, acquired.provider.isLocal === true, {
+                            ownKey: usesOrgOwnKey(acquired.provider),
+                          })
                         : null;
                       if (refusal) {
                         capRefusal = refusal;
@@ -1958,7 +2288,21 @@ export class StreamingChatHandler {
           // guard blocks, the response must not be saved to the
           // conversation (the user never sees it via SSE).
           if (assistantText.length > 0) {
-            const outputScan = scanOutput(assistantText, agent.topicBoundaries ?? []);
+            // The messages this iteration sent: an identifier they carried
+            // (the user's own email, a tool result's phone number) is not a
+            // leak when the reply repeats it.
+            // The admin's ignored types govern both the privacy layer and this
+            // check. Unreadable settings: nothing ignored, the stricter reading.
+            const ignoredEntityTypes = await getOrchestrationSettings().then(
+              (settings) => settings.privacyIgnoredEntityTypes,
+              () => []
+            );
+            const outputScan = await scanOutput(
+              assistantText,
+              agent.topicBoundaries ?? [],
+              messages,
+              { ignoredEntityTypes }
+            );
             if (outputScan.flagged) {
               log.warn('Output guard triggered', {
                 agentSlug: request.agentSlug,
@@ -1988,7 +2332,7 @@ export class StreamingChatHandler {
               emitGuardEvent(guardEventContext, 'output', outputMode);
 
               if (outputMode === 'block') {
-                yield errorEvent(
+                yield await endWithError(
                   'output_blocked',
                   'Response blocked by content policy. Please rephrase your question.'
                 );
@@ -2038,7 +2382,7 @@ export class StreamingChatHandler {
               emitGuardEvent(guardEventContext, 'citation', citationMode);
 
               if (citationMode === 'block') {
-                yield errorEvent(
+                yield await endWithError(
                   'citation_required',
                   citationScan.underCited
                     ? 'Response was blocked because it did not cite any of the retrieved sources.'
@@ -2151,8 +2495,11 @@ export class StreamingChatHandler {
             if (sideEffects.length > 0) {
               assistantMetadata.sideEffectModels = sideEffects;
             }
+            // What the privacy layer counted across the turn's calls (§127).
+            // Counts only; absent when it scanned none.
+            Object.assign(assistantMetadata, privacyField(privacyScope));
           }
-          const assistantMsg = await this.persistMessage({
+          const assistantMsg = await persistTurnRow({
             conversationId: conversation.id,
             role: 'assistant',
             content: assistantText,
@@ -2240,6 +2587,7 @@ export class StreamingChatHandler {
               userId: userIdForUserRef(request.userId),
               model: resolvedModel,
               provider: resolvedProviderSlug ?? resolvedBinding.providerSlug,
+              ownKey: usesOrgOwnKey(currentProvider),
               inputTokens: u.inputTokens,
               outputTokens: u.outputTokens,
               cacheReadTokens: u.cacheReadTokens,
@@ -2343,6 +2691,7 @@ export class StreamingChatHandler {
             userId: userIdForUserRef(request.userId),
             model: resolvedModel,
             provider: resolvedProviderSlug ?? resolvedBinding.providerSlug,
+            ownKey: usesOrgOwnKey(currentProvider),
             inputTokens: turnUsage.inputTokens,
             outputTokens: turnUsage.outputTokens,
             cacheReadTokens: turnUsage.cacheReadTokens,
@@ -2389,7 +2738,7 @@ export class StreamingChatHandler {
           // call request; it may be empty for tool-first responses,
           // which is fine — the metadata marker is the load-bearing
           // bit for replay.
-          await this.persistMessage({
+          await persistTurnRow({
             conversationId: conversation.id,
             role: 'assistant',
             content: assistantText,
@@ -2397,6 +2746,7 @@ export class StreamingChatHandler {
             modelId: resolvedModel,
             providerSlug: resolvedProviderSlug ?? resolvedBinding.providerSlug,
             metadata: {
+              ...privacyField(privacyScope),
               endedReason: 'budget_exceeded',
               budgetExceededDetail: {
                 usedUsd: turnCostUsd,
@@ -2437,13 +2787,24 @@ export class StreamingChatHandler {
         // prevent TOCTOU overruns when concurrent requests hit the same agent).
         const midBudget = await withAgentBudgetLock(agent.id, () => checkBudget(agent.id));
         budgetNotice = { agent, budget: midBudget };
-        if (!midBudget.withinBudget) {
-          const refusal = budgetRefusal(midBudget);
+        // As before the turn, a turn on the org's own key goes on unless its
+        // agent's cap is reached.
+        const midOnOwnKey = usesOrgOwnKey(currentProvider);
+        if (!midBudget.withinBudget && (midBudget.agentCapExceeded || !midOnOwnKey)) {
+          const refusal = budgetRefusal(midBudget, { ownKey: midOnOwnKey });
           // Held, as before the turn, while the turn is on a local provider.
           if (currentProvider.isLocal) {
             hold.cap = refusal.cap;
+            hold.agentCapReached = midBudget.agentCapExceeded === true;
           } else {
-            yield errorEvent(refusal.code, refusal.message);
+            notifyBudgetExceeded({
+              agent,
+              budget: midBudget,
+              cap: refusal.cap,
+              request,
+              conversationId,
+            });
+            yield await endWithError(refusal.code, refusal.message);
             return;
           }
         }
@@ -2534,7 +2895,7 @@ export class StreamingChatHandler {
                 message: refusal.message,
               },
             };
-            await this.persistMessage({
+            await persistTurnRow({
               conversationId: conversation.id,
               role: 'tool',
               content: JSON.stringify(unavailableResult),
@@ -2643,7 +3004,7 @@ export class StreamingChatHandler {
             ...(request.includeTrace ? { trace: singleTrace } : {}),
           };
 
-          await this.persistMessage({
+          await persistTurnRow({
             conversationId: conversation.id,
             role: 'tool',
             content: JSON.stringify(augmentedResult),
@@ -2678,14 +3039,19 @@ export class StreamingChatHandler {
           // via a follow-up message; the LLM does not narrate here.
           const pendingApproval = extractPendingApproval(tc.name, augmentedResult);
           if (pendingApproval) {
-            await this.persistMessage({
+            await persistTurnRow({
               conversationId: conversation.id,
               role: 'assistant',
               content: '',
               agentVersionId,
               modelId: resolvedModel,
               providerSlug: currentProviderSlug,
-              metadata: { pendingApproval },
+              // The turn ends here when the result says so, and then this
+              // is its last assistant message.
+              metadata: {
+                pendingApproval,
+                ...(result.skipFollowup ? privacyField(privacyScope) : {}),
+              },
             });
             yield { type: 'approval_required', pendingApproval };
           }
@@ -2842,7 +3208,7 @@ export class StreamingChatHandler {
               result,
               ...(request.includeTrace ? { trace: skippedTrace } : {}),
             });
-            await this.persistMessage({
+            await persistTurnRow({
               conversationId: conversation.id,
               role: 'tool',
               content: JSON.stringify(result),
@@ -2928,7 +3294,7 @@ export class StreamingChatHandler {
               ...(request.includeTrace ? { trace: parallelTrace } : {}),
             });
 
-            await this.persistMessage({
+            await persistTurnRow({
               conversationId: conversation.id,
               role: 'tool',
               content: JSON.stringify(augmentedResult),
@@ -2978,14 +3344,17 @@ export class StreamingChatHandler {
           for (const r of results) {
             const pa = extractPendingApproval(r.capabilitySlug, r.result);
             if (pa) {
-              await this.persistMessage({
+              await persistTurnRow({
                 conversationId: conversation.id,
                 role: 'assistant',
                 content: '',
                 agentVersionId,
                 modelId: resolvedModel,
                 providerSlug: currentProviderSlug,
-                metadata: { pendingApproval: pa },
+                metadata: {
+                  pendingApproval: pa,
+                  ...(anySkipFollowup ? privacyField(privacyScope) : {}),
+                },
               });
               yield { type: 'approval_required', pendingApproval: pa };
             }
@@ -3030,7 +3399,7 @@ export class StreamingChatHandler {
         agentSlug: request.agentSlug,
         iterations: MAX_TOOL_ITERATIONS,
       });
-      yield errorEvent(
+      yield await endWithError(
         'tool_loop_cap',
         `Exceeded maximum tool iterations (${MAX_TOOL_ITERATIONS})`
       );
@@ -3040,34 +3409,6 @@ export class StreamingChatHandler {
       // the finally. In-try `yield errorEvent(...); return;` paths are
       // application-level outcomes (HTTP 4xx-equivalent) and keep span ok.
       chatSpanError = err;
-
-      // Persist an error-marker assistant message so the conversation has no
-      // orphaned user message with no response — the user's turn was written
-      // up front, so returning without this leaves a question that reloads
-      // with no answer at all. Clients detect the marker via
-      // `metadata.error === true`.
-      const persistErrorMarker = async (errorCode: string): Promise<void> => {
-        if (!conversationId) return;
-        try {
-          await this.persistMessage({
-            conversationId,
-            role: 'assistant',
-            content: '[An error occurred and the response could not be completed.]',
-            agentVersionId,
-            // Pin provider only — `resolvedModel` lives inside the try
-            // and isn't reliably in scope here. modelId stays null on
-            // error markers; the audit trail reads that as "model in
-            // effect at error time was ambiguous (possibly mid-fallback)".
-            ...(resolvedProviderSlug ? { providerSlug: resolvedProviderSlug } : {}),
-            metadata: { error: true, errorCode },
-          });
-        } catch (persistErr) {
-          log.warn('Failed to persist error-marker assistant message', {
-            conversationId,
-            error: persistErr instanceof Error ? persistErr.message : String(persistErr),
-          });
-        }
-      };
 
       if (err instanceof ChatError) {
         log.warn('Chat handler surfaced known error', {
@@ -3098,6 +3439,59 @@ export class StreamingChatHandler {
         // fallbacks — or a request fault like `truncated_no_output`, which
         // now ends the turn here rather than failing over — leaves the user
         // message unanswered on reload.
+        // Refused under `block` (§127 t-1014, t-1017, t-1018): every later
+        // turn would resend what held the details and be refused again. Leave
+        // out of later history this turn's rows and any earlier row that held
+        // them, and discard a summary that held them; all of it stays in the
+        // transcript. Delete a memory that held them: it is sent in every
+        // conversation with this agent. Details in the assistant's setup are
+        // not ours to leave out: the reader is told to ask an administrator.
+        // A refusal for confidential content (§130) is left out and placed
+        // the same way, from where the stage found the refused group's
+        // content, and told with its own codes.
+        const refusalKind = privacyRefusalKind(err.code);
+        if (refusalKind !== null) {
+          const placed = this.placeBlockedTurn(
+            err,
+            builtRequest,
+            refusedCallMessageCount,
+            refusalKind
+          );
+          await this.leaveRowsOutOfHistory(
+            [...turnRowIds, ...(placed?.earlierRowIds ?? [])],
+            conversationId,
+            request.userId,
+            log,
+            refusalKind === 'confidential' ? PRIVACY_CONFIDENTIAL : PRIVACY_BLOCKED
+          );
+          if (placed?.summary && builtRequest) {
+            await this.forgetSummary(conversationId, request.userId, builtRequest.summaryPin, log);
+          }
+          if (placed && placed.memories.length > 0 && builtRequest) {
+            await this.forgetMemories(placed.memories, builtRequest.agentId, request.userId, log);
+          }
+          if (placed) {
+            // Where, never what: the kinds of source and how many rows.
+            log.warn(
+              refusalKind === 'confidential'
+                ? 'Chat turn refused for confidential content'
+                : 'Chat turn refused for personal details',
+              {
+                conversationId,
+                code: placed.code,
+                turn: placed.turn,
+                earlierRows: placed.earlierRowIds.length,
+                summary: placed.summary,
+                memories: placed.memories.length,
+                setup: placed.setup,
+              }
+            );
+          }
+          const code = placed?.code ?? err.code;
+          await persistErrorMarker(code);
+          yield errorEvent(code, getUserFacingError(code).message);
+          return;
+        }
         await persistErrorMarker(err.code);
         // A spend cap ends with the words a refusal before the turn uses.
         yield errorEvent(
@@ -3249,19 +3643,323 @@ export class StreamingChatHandler {
   }
 
   /**
-   * Drop error markers. They exist so the CLIENT can show a failed turn instead
-   * of an unanswered question; this history is only ever used to rebuild the
-   * prompt (`historyRows`, the summary threshold, the first-turn check) and
-   * never returned to a caller. Feeding "[An error occurred and the response
-   * could not be completed.]" back to the model burns context and invites
-   * imitation, for the rest of the conversation. Excluded in JS rather than the
-   * `where` because the flag lives in a JSON column.
+   * Yields the turn's `warn` notes (§130) just before the first event that
+   * ends the turn: `done`, an `error`, or `budget_exceeded_per_turn`. In one
+   * place rather than at each ending, so an ending added later cannot leave
+   * the note out (t-1039). Placed there, the note comes after the answer, and
+   * after whatever an ending does before yielding its event: in the catch,
+   * the error marker and leaving a refused turn out of history. A reader that
+   * stops at the note, or at the error after it, stops the turn only once
+   * that work is done. The embed widget stops reading at an error, so the
+   * note goes before it, not after. Once per turn: a turn the per-turn cap
+   * ends sends that event and `done`. A turn ended before its conversation
+   * was loaded sent nothing, so has none.
+   *
+   * Outside `runInner`'s catch, so a failure here is caught here: the note is
+   * dropped and the turn's own ending still goes out.
    */
-  private withoutErrorMarkers(messages: AiMessage[]): AiMessage[] {
-    return messages.filter((m) => {
-      const metadata = (m.metadata ?? null) as MessageMetadata | null;
-      return metadata?.error !== true;
-    });
+  private async *withConfidentialNotes(
+    events: AsyncGenerator<ChatEvent, void, unknown>,
+    scope: PrivacyScope,
+    userId: string,
+    noted: NoteTarget,
+    log: typeof logger
+  ): AsyncGenerator<ChatEvent, void, unknown> {
+    let shown = false;
+    for await (const event of events) {
+      if (!shown && TURN_ENDING_EVENTS.has(event.type)) {
+        shown = true;
+        if (noted.conversationId) {
+          try {
+            yield* this.confidentialNotes(scope, noted.conversationId, noted.movedTo, userId, log);
+          } catch (err) {
+            log.warn('Failed to show the confidential-content note', {
+              conversationId: noted.conversationId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      yield event;
+    }
+  }
+
+  /**
+   * The notes a turn holding confidential content shows (§130). Two kinds:
+   *
+   * - **warn** (owner ruling 2026-11-17: a note after sending), once per
+   *   conversation per group. A conversation flagged once stays flagged,
+   *   because each call resends the message that was flagged, so keying on
+   *   "this turn's calls held it" would repeat it on every turn.
+   * - **moved** (t-1038), once per conversation: the turn was answered on the
+   *   model for confidential messages, and later turns will be too.
+   *
+   * What was shown is kept on the conversation (`metadata.confidentialNoted`,
+   * `metadata.confidentialMoved`), so it survives the history being
+   * summarised or pruned. Shown even if that write fails: a repeat is better
+   * than a note never seen. Never names what was found.
+   */
+  private async *confidentialNotes(
+    scope: PrivacyScope,
+    conversationId: string,
+    movedTo: NoteTarget['movedTo'],
+    userId: string,
+    log: typeof logger
+  ): AsyncGenerator<ChatEvent> {
+    const decisions = privacySummary(scope)?.confidential;
+    const warned = decisions
+      ? SENSITIVITY_GROUPS.filter((g) => decisions[g]?.includes('warned'))
+      : [];
+    if (warned.length === 0 && movedTo === null) return;
+    const owned = { id: conversationId, ...conversationOwner(userId) };
+    let read: { metadata: Prisma.JsonObject; stored: Prisma.JsonValue | null } | null = null;
+    let toNote: SensitivityGroup[] = warned;
+    let showMoved = movedTo !== null;
+    try {
+      const row = await prisma.aiConversation.findFirst({
+        where: owned,
+        select: { metadata: true },
+      });
+      if (row) {
+        const metadata = isJsonObject(row.metadata) ? row.metadata : {};
+        const noted = Array.isArray(metadata.confidentialNoted) ? metadata.confidentialNoted : [];
+        toNote = warned.filter((g) => !noted.includes(g));
+        showMoved = showMoved && metadata.confidentialMoved !== true;
+        read = {
+          metadata: {
+            ...metadata,
+            ...(toNote.length > 0 ? { confidentialNoted: [...noted, ...toNote] } : {}),
+            ...(showMoved ? { confidentialMoved: true } : {}),
+          },
+          stored: row.metadata,
+        };
+      }
+    } catch (err) {
+      log.warn('Failed to read which confidential-content notes were shown', {
+        conversationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (toNote.length === 0 && !showMoved) return;
+    // Shown before it is recorded: a reader who left before the note arrived
+    // is told again next turn, rather than never.
+    if (showMoved && movedTo !== null) {
+      yield {
+        type: 'warning',
+        code: CONFIDENTIAL_MOVED_CODE,
+        message: CONFIDENTIAL_MOVED_NOTES[movedTo],
+      };
+    }
+    for (const group of toNote) {
+      yield {
+        type: 'warning',
+        code: CONFIDENTIAL_NOTE_CODES[group],
+        message: CONFIDENTIAL_NOTES[group],
+      };
+    }
+    if (!read) return;
+    try {
+      // Only over the metadata it read: a write made since is kept, and this
+      // one is dropped, so at worst the note is shown again.
+      await prisma.aiConversation.updateMany({
+        where: {
+          ...owned,
+          metadata: read.stored === null ? { equals: Prisma.AnyNull } : { equals: read.stored },
+        },
+        data: { metadata: read.metadata },
+      });
+    } catch (err) {
+      log.warn('Failed to record a confidential-content note as shown', {
+        conversationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * The rows a later call may resend: without error markers, and without the
+   * rows of a turn the privacy layer refused (`isLeftOutOfHistory`). This
+   * history is only ever used to rebuild the prompt (`historyRows`, the
+   * summary threshold, the first-turn check) and never returned to a caller,
+   * so the summariser never sees either kind. Excluded in JS rather than the
+   * `where` because both flags live in a JSON column.
+   */
+  private resendableRows(messages: AiMessage[]): AiMessage[] {
+    return messages.filter((m) => !isLeftOutOfHistory(m.metadata));
+  }
+
+  /**
+   * Where a refusal under `block` found the details, when the refused call is
+   * one this turn made and the stage said where (t-1017). Null otherwise, and
+   * then only the turn's own rows are left out, as in t-1014.
+   */
+  private placeBlockedTurn(
+    err: ProviderError,
+    built: BuiltTurnRequest | null,
+    refusedCallMessageCount: number | null,
+    kind: PrivacyRefusalKind
+  ): PlacedPrivacyRefusal | null {
+    if (!built || refusedCallMessageCount === null || !(err instanceof PrivacyRefusedError)) {
+      return null;
+    }
+    return placePrivacyRefusal(
+      err.found,
+      { ...built, messageCount: refusedCallMessageCount },
+      kind
+    );
+  }
+
+  /**
+   * Mark rows so every later history read leaves them out (§127 t-1014): the
+   * rows of a turn the privacy layer refused under `block`, and any earlier
+   * row the refusal found personal details in (t-1017). That also heals an
+   * earlier refused turn whose own marking failed. They stay in the
+   * transcript and the audit trail. Best effort, like the error marker. If
+   * the write fails, nothing retries it here. Nothing is sent while the rows
+   * are resent, and the next refusal that can say where it found the details
+   * (a chat call this handler made) finds the rows that are still in the
+   * prompt and marks them.
+   *
+   * The metadata is read back here rather than taken from what the turn
+   * wrote, so anything set on a row before this read (a fork's hook on
+   * `message.created`, say) is kept. Only the rows the read finds are
+   * updated, so a row removed before it is skipped. Not atomic with the
+   * update: a write or removal in the moment between the two is lost, or
+   * rolls the batch back. Nothing in core writes a message after creating it.
+   */
+  private async leaveRowsOutOfHistory(
+    ids: string[],
+    conversationId: string | null,
+    userId: string,
+    log: typeof logger,
+    // What the rows are left out for: personal details under `block`, or
+    // confidential content under a group's policy (§130).
+    marker: typeof PRIVACY_BLOCKED | typeof PRIVACY_CONFIDENTIAL = PRIVACY_BLOCKED
+  ): Promise<void> {
+    if (ids.length === 0 || !conversationId) return;
+    try {
+      const owned = { conversationId, conversation: conversationOwner(userId) };
+      const rows = await prisma.aiMessage.findMany({
+        where: { id: { in: ids }, ...owned },
+        select: { id: true, metadata: true },
+      });
+      await prisma.$transaction(
+        rows.map((row) =>
+          prisma.aiMessage.update({
+            where: { id: row.id, ...owned },
+            data: {
+              metadata: {
+                ...(isJsonObject(row.metadata) ? row.metadata : {}),
+                excludedFromHistory: marker,
+              },
+            },
+            select: { id: true },
+          })
+        )
+      );
+    } catch (err) {
+      log.warn('Failed to leave privacy-refused rows out of history', {
+        messageIds: ids,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Forget a stored summary the privacy layer found personal details in
+   * (t-1017; owner ruling 2026-11-12: the conversation carries on and
+   * forgets). Under `block` it can never be sent again, and it cannot be
+   * rebuilt from itself: the summariser's call would carry it and be refused.
+   *
+   * Its text is replaced by the gap note alone ("up to N earlier messages may
+   * not be described"), N counting every row up to the pin, and the pin is
+   * kept. So the rows it covered are never read again (re-read, any that hold
+   * details would be refused again, in the prompt or, past the cap, in a
+   * summariser call nothing can place), the model is told what it no longer
+   * has, and later folds carry the note forward as they carry any gap.
+   * Without a pin there is nothing to keep, and the summary is cleared.
+   *
+   * Only if the pin is still the one this turn read: a concurrent turn that
+   * moved it wrote a summary of its own, and this turn knows nothing about
+   * that one. Best effort, like the marking: if it fails, the next refusal
+   * finds the same summary.
+   */
+  private async forgetSummary(
+    conversationId: string | null,
+    userId: string,
+    pin: string | null,
+    log: typeof logger
+  ): Promise<void> {
+    if (!conversationId) return;
+    try {
+      const owned = { conversationId, conversation: conversationOwner(userId) };
+      const pinRow = pin
+        ? await prisma.aiMessage.findFirst({
+            where: { id: pin, ...owned },
+            select: { createdAt: true },
+          })
+        : null;
+      const covered = pinRow
+        ? await prisma.aiMessage.count({
+            where: { ...owned, createdAt: { lte: pinRow.createdAt } },
+          })
+        : 0;
+      await prisma.aiConversation.updateMany({
+        where: { id: conversationId, ...conversationOwner(userId), summaryUpToMessageId: pin },
+        data:
+          pinRow && covered > 0
+            ? { summary: withGapNote('', covered) }
+            : { summary: null, summaryUpToMessageId: null },
+      });
+    } catch (err) {
+      log.warn('Failed to forget a privacy-refused conversation summary', {
+        conversationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Delete the user's memories the privacy layer found personal details in
+   * (t-1018; owner ruling 2026-11-12: carry on and forget). Each is sent in
+   * every conversation the user has with this agent, so under `block` every
+   * turn would be refused, and nothing else can remove one: the capability
+   * that writes them needs an LLM call, and no page or API deletes them.
+   *
+   * Only a memory still as this turn read it: one rewritten since (a
+   * concurrent turn's `write_user_memory`) is not the one that was refused,
+   * and is kept. Best effort, like the marking: if it fails, the next refusal
+   * finds the same memory.
+   */
+  private async forgetMemories(
+    memories: readonly SentMemory[],
+    agentId: string,
+    userId: string,
+    log: typeof logger
+  ): Promise<void> {
+    try {
+      const { count } = await prisma.aiUserMemory.deleteMany({
+        where: {
+          userId,
+          agentId,
+          OR: memories.map(({ id, updatedAt }) => ({ id, updatedAt })),
+        },
+      });
+      // Rewritten since this turn read it, or already gone: kept, and the
+      // next refusal finds it if it still holds details. Counts only.
+      if (count < memories.length) {
+        log.warn('Some privacy-refused user memories were not deleted', {
+          memories: memories.length,
+          deleted: count,
+        });
+      }
+    } catch (err) {
+      // A count, never a key or a value.
+      log.warn('Failed to forget privacy-refused user memories', {
+        memories: memories.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -3299,7 +3997,7 @@ export class StreamingChatHandler {
     const kept = fetched.slice(0, HISTORY_LOAD_LIMIT);
     const last = kept[kept.length - 1];
     return {
-      rows: this.withoutErrorMarkers(kept),
+      rows: this.resendableRows(kept),
       overflow: fetched.length > HISTORY_LOAD_LIMIT,
       lastFetched: last ? { id: last.id, createdAt: last.createdAt } : null,
     };
@@ -3312,9 +4010,9 @@ export class StreamingChatHandler {
    *
    * `omitted` is an upper bound on the rows this read did not reach that nothing
    * describes — everything older than the window, or, given `afterPin`, only
-   * what follows the pin (older rows are the summary's). It counts error
-   * markers too, which a read never shows, so it can overstate; the prompt says
-   * "up to". `excludeId` is the turn's own user message, which a read made after
+   * what follows the pin (older rows are the summary's). It counts the rows
+   * left out of history too (error markers, a privacy-refused turn's), which a
+   * read never shows, so it can overstate; the prompt says "up to". `excludeId` is the turn's own user message, which a read made after
    * it was persisted would otherwise return and the prompt would carry twice.
    */
   private async loadNewestHistory(
@@ -3341,7 +4039,7 @@ export class StreamingChatHandler {
     const unseen =
       fetched.length > HISTORY_LOAD_LIMIT ? await prisma.aiMessage.count({ where: scope }) : 0;
     return {
-      rows: this.withoutErrorMarkers(fetched.slice(0, HISTORY_LOAD_LIMIT)).reverse(),
+      rows: this.resendableRows(fetched.slice(0, HISTORY_LOAD_LIMIT)).reverse(),
       omitted: Math.max(0, unseen - HISTORY_LOAD_LIMIT),
     };
   }
@@ -3552,8 +4250,71 @@ function isClientAbort(err: unknown, signal?: AbortSignal): boolean {
   return signal === undefined && err.message.includes('aborted');
 }
 
+/** What a turn's confidential-content notes need: where to keep them, and whether it moved. */
+interface NoteTarget {
+  /** Its conversation, once loaded. */
+  conversationId: string | null;
+  /** Set when the turn moved to the model for confidential messages (§130 t-1038). */
+  movedTo: 'local' | 'trusted' | null;
+}
+
+/** The events a turn ends on; the `warn` note goes before the first of them. */
+const TURN_ENDING_EVENTS: ReadonlySet<ChatEvent['type']> = new Set([
+  'done',
+  'error',
+  'budget_exceeded_per_turn',
+]);
+
+/** The turn's logger, carrying its request and visitor ids when it has them. */
+function turnLogger(request: ChatRequest): typeof logger {
+  return request.requestId || request.visitorId
+    ? logger.withContext({ requestId: request.requestId, visitorId: request.visitorId })
+    : logger;
+}
+
 function errorEvent(code: string, message: string): ChatEvent {
   return { type: 'error', code, message };
+}
+
+/**
+ * The error a turn ends with when `model` cannot read its attachments, or
+ * null when it can (or there are none). `whose` names the model to the
+ * reader: the agent's, or the model for confidential messages a turn moved
+ * to (§130 t-1038).
+ */
+async function attachmentGateError(
+  providerSlug: string,
+  model: string,
+  hasImages: boolean,
+  hasPdfs: boolean,
+  whose: string
+): Promise<ChatEvent | null> {
+  const required: AttachmentCapability[] = [];
+  if (hasImages) required.push('vision');
+  if (hasPdfs) required.push('documents');
+  if (required.length === 0) return null;
+  try {
+    await assertModelSupportsAttachments(providerSlug, model, required);
+    return null;
+  } catch (err) {
+    if (!(err instanceof ProviderError) || err.code !== 'CAPABILITY_NOT_SUPPORTED') throw err;
+    if (hasImages && !hasPdfs) {
+      return errorEvent(
+        'IMAGE_NOT_SUPPORTED',
+        `${whose} can't process images. Switch the model to one with vision support.`
+      );
+    }
+    if (hasPdfs && !hasImages) {
+      return errorEvent(
+        'PDF_NOT_SUPPORTED',
+        `${whose} can't process PDFs. Switch the model to one with document support.`
+      );
+    }
+    return errorEvent(
+      'IMAGE_NOT_SUPPORTED',
+      `${whose} can't process all of the attached files. Switch the model or remove unsupported attachments.`
+    );
+  }
 }
 
 /** A budget refusal: the code and words a turn ends with, and which cap stopped it. */
@@ -3581,12 +4342,19 @@ function refusalText(code: string): string {
  * the one worth saying. The org and global messages name no amount — the
  * reader may be an embed visitor, and those caps are not theirs to know.
  */
-function budgetRefusal(budget: BudgetStatus): BudgetRefusalReason {
-  const cap: SpendCap = budget.globalCapExceeded
-    ? 'global'
-    : budget.orgCapExceeded
-      ? 'org'
-      : 'agent';
+function budgetRefusal(
+  budget: BudgetStatus,
+  options: { ownKey?: boolean } = {}
+): BudgetRefusalReason {
+  // A turn on the org's own key is refused only for its agent's cap (§137), so
+  // that is the cap it names, whichever others are also reached.
+  const cap: SpendCap = options.ownKey
+    ? 'agent'
+    : budget.globalCapExceeded
+      ? 'global'
+      : budget.orgCapExceeded
+        ? 'org'
+        : 'agent';
   const code = SPEND_CAP_CODES[cap];
   return { code, cap, message: refusalText(code) };
 }

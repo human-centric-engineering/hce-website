@@ -97,6 +97,13 @@ vi.mock('@/lib/orchestration/engine/lease', () => ({
 
 import { OrchestrationEngine } from '@/lib/orchestration/engine/orchestration-engine';
 import {
+  createPrivacyScope,
+  currentPrivacyScope,
+  privacySummary,
+  recordPrivacyCall,
+  runInPrivacyScope,
+} from '@/lib/orchestration/privacy/scope';
+import {
   __resetRegistryForTests,
   registerStepType,
 } from '@/lib/orchestration/engine/executor-registry';
@@ -5750,6 +5757,56 @@ describe('OrchestrationEngine', () => {
       expect(ran).toEqual(['b']);
     });
 
+    it('crash-resume: keeps what the walk left untaken, so a join after a route still runs (t-1077)', async () => {
+      // pick (route) → x | y → join. The route takes x, so y is untaken and the
+      // join waits only on x. A resume that forgot y would deadlock on it.
+      const def: WorkflowDefinition = {
+        entryStepId: 'pick',
+        errorStrategy: 'fail',
+        steps: [
+          {
+            id: 'pick',
+            name: 'Pick',
+            type: 'route',
+            config: {},
+            nextSteps: [
+              { targetStepId: 'x', condition: 'x' },
+              { targetStepId: 'y', condition: 'y' },
+            ],
+          },
+          {
+            id: 'x',
+            name: 'X',
+            type: 'llm_call',
+            config: {},
+            nextSteps: [{ targetStepId: 'join' }],
+          },
+          {
+            id: 'y',
+            name: 'Y',
+            type: 'llm_call',
+            config: {},
+            nextSteps: [{ targetStepId: 'join' }],
+          },
+          { id: 'join', name: 'Join', type: 'llm_call', config: {}, nextSteps: [] },
+        ],
+      };
+      const impl: StepImpl = async (step) => ({
+        output: `out:${step.id}`,
+        tokensUsed: 0,
+        costUsd: 0,
+        ...(step.id === 'pick' ? { nextStepIds: ['x'] } : {}),
+      });
+
+      const row = await crashRun(def, impl, (m) => m.starting === 'join');
+      expect((row.walkState as { untaken?: string[] }).untaken).toEqual(['y']);
+      const { ran, types } = await resumeRun(def, row, impl, 'join');
+
+      expect(ran).toEqual(['join']);
+      expect(types).toContain('workflow_completed');
+      expect(types).not.toContain('workflow_failed');
+    });
+
     it('crash-resume: a step whose checkpoint landed is not run again', async () => {
       // The host died after b's checkpoint and before c started. b's
       // running-step row may survive (its delete is non-fatal); the walk
@@ -7045,6 +7102,114 @@ describe('OrchestrationEngine', () => {
           return args.where.executionId === EXEC_ID && args.where.stepId === undefined;
         });
       expect(wholeExecDeletes.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ─── The privacy scope (§127, t-991) ────────────────────────────────────
+
+  describe('privacy counts on the trace', () => {
+    /**
+     * An executor that does what the privacy stage does on the Proxy: records
+     * counts into the scope its call runs in. The engine is the subject.
+     */
+    function recordingExecutor(countsByStep: Record<string, Record<string, number>>) {
+      const seen: Record<string, ReturnType<typeof currentPrivacyScope>> = {};
+      registerStepType('llm_call', async (step) => {
+        await new Promise((r) => setTimeout(r, 1));
+        const scope = currentPrivacyScope();
+        seen[step.id] = scope;
+        if (scope && countsByStep[step.id]) {
+          recordPrivacyCall(scope, {
+            kind: 'chat',
+            mode: 'detect',
+            counts: countsByStep[step.id],
+            degraded: false,
+            failedAdapters: [],
+          });
+        }
+        return { output: step.id, tokensUsed: 0, costUsd: 0 };
+      });
+      return seen;
+    }
+
+    function lastTrace() {
+      return vi
+        .mocked(prisma.aiWorkflowExecution.updateMany)
+        .mock.calls.map(
+          (c) => (c[0] as { data?: { executionTrace?: unknown } }).data?.executionTrace
+        )
+        .filter(Array.isArray)
+        .pop() as Array<{ stepId: string; privacy?: unknown }>;
+    }
+
+    it("records each sequential step's own counts on its entry, in a child of the execution's scope", async () => {
+      const seen = recordingExecutor({ a: { EMAIL: 1 }, b: { PERSON: 2 } });
+
+      await collect(new OrchestrationEngine(), makeWorkflow(linearDefinition()));
+
+      const trace = lastTrace();
+      expect(trace.find((e) => e.stepId === 'a')?.privacy).toMatchObject({
+        calls: 1,
+        counts: { EMAIL: 1 },
+      });
+      expect(trace.find((e) => e.stepId === 'b')?.privacy).toMatchObject({
+        calls: 1,
+        counts: { PERSON: 2 },
+      });
+      expect(seen.a?.scopeId).toMatch(/^execution:.+:step:a$/);
+      expect(seen.a?.userId).toBe(USER_ID);
+      // Both steps sit in the same execution scope, which saw both calls.
+      expect(seen.a?.parent).toBeDefined();
+      expect(seen.a?.parent).toBe(seen.b?.parent);
+      expect(seen.a?.parent?.tally.calls).toBe(2);
+    });
+
+    it('keeps parallel branches apart: each entry has only its own calls', async () => {
+      registerStepType('parallel', async (step) => ({
+        output: { parallel: true, branches: step.nextSteps.map((e) => e.targetStepId) },
+        tokensUsed: 0,
+        costUsd: 0,
+      }));
+      recordingExecutor({ a: { EMAIL: 1 }, b: { PHONE: 3 } });
+      const def: WorkflowDefinition = {
+        steps: [
+          {
+            id: 'p',
+            name: 'Parallel',
+            type: 'parallel',
+            config: {},
+            nextSteps: [{ targetStepId: 'a' }, { targetStepId: 'b' }],
+          },
+          { id: 'a', name: 'A', type: 'llm_call', config: { prompt: 'A' }, nextSteps: [] },
+          { id: 'b', name: 'B', type: 'llm_call', config: { prompt: 'B' }, nextSteps: [] },
+        ],
+        entryStepId: 'p',
+        errorStrategy: 'fail',
+      };
+
+      await collect(new OrchestrationEngine(), makeWorkflow(def));
+
+      const trace = lastTrace();
+      expect(trace.find((e) => e.stepId === 'a')?.privacy).toMatchObject({ counts: { EMAIL: 1 } });
+      expect(trace.find((e) => e.stepId === 'b')?.privacy).toMatchObject({ counts: { PHONE: 3 } });
+      expect(trace.find((e) => e.stepId === 'p')).not.toHaveProperty('privacy');
+    });
+
+    it("counts a run started inside other work — an agent's run_workflow mid-turn — there too", async () => {
+      recordingExecutor({ a: { EMAIL: 1 }, b: { PHONE: 1 } });
+      const turn = createPrivacyScope({ scopeId: 'conversation:c1' });
+
+      await runInPrivacyScope(turn, () =>
+        collect(new OrchestrationEngine(), makeWorkflow(linearDefinition()))
+      );
+
+      expect(privacySummary(turn)).toMatchObject({ calls: 2, counts: { EMAIL: 1, PHONE: 1 } });
+    });
+
+    it('writes no privacy field for a step whose calls were not scanned', async () => {
+      recordingExecutor({});
+      await collect(new OrchestrationEngine(), makeWorkflow(linearDefinition()));
+      for (const entry of lastTrace()) expect(entry).not.toHaveProperty('privacy');
     });
   });
 });

@@ -13,20 +13,22 @@ For authentication-specific security (password hashing, sessions, OAuth), see [A
 
 All security utilities are located in `lib/security/`:
 
-| File                       | Purpose                                                   |
-| -------------------------- | --------------------------------------------------------- |
-| `constants.ts`             | Security constants (rate limits, CORS config)             |
-| `rate-limit.ts`            | Sliding window rate limiter primitives + tier registry    |
-| `rate-limit-policy.ts`     | Path-to-tier policy table (single source of truth)        |
-| `rate-limit-middleware.ts` | Dispatcher (`applyRateLimit`) consumed by `proxy.ts`      |
-| `rate-limit-stores/`       | Pluggable backing stores: memory (LRU, default) and Redis |
-| `headers.ts`               | CSP and security headers utilities                        |
-| `sanitize.ts`              | XSS prevention and input sanitization                     |
-| `cors.ts`                  | CORS configuration and utilities                          |
-| `ip.ts`                    | Client IP extraction with validation                      |
-| `redact.ts`                | PII redaction primitives ([details](./pii-redaction.md))  |
-| `safe-url.ts`              | SSRF guard for admin-settable outbound URLs               |
-| `index.ts`                 | Module exports                                            |
+| File                       | Purpose                                                     |
+| -------------------------- | ----------------------------------------------------------- |
+| `constants.ts`             | Security constants (rate limits, CORS config)               |
+| `rate-limit.ts`            | Sliding window rate limiter primitives + tier registry      |
+| `rate-limit-policy.ts`     | Path-to-tier policy table (single source of truth)          |
+| `rate-limit-middleware.ts` | Dispatcher (`applyRateLimit`) consumed by `proxy.ts`        |
+| `rate-limit-stores/`       | Pluggable backing stores: memory (LRU, default) and Redis   |
+| `headers.ts`               | CSP and security headers utilities                          |
+| `sanitize.ts`              | XSS prevention and input sanitization                       |
+| `cors.ts`                  | CORS configuration and utilities                            |
+| `ip.ts`                    | Client IP extraction with validation                        |
+| `redact.ts`                | PII redaction primitives ([details](./pii-redaction.md))    |
+| `safe-url.ts`              | SSRF guard for admin-settable outbound URLs                 |
+| `sealed-secrets.ts`        | Sealing stored credentials ([details](./sealed-secrets.md)) |
+| `sealed-stores.ts`         | Where sealed values live; the reseal walk                   |
+| `index.ts`                 | Module exports                                              |
 
 The project-root `proxy.ts` (Next.js 16's renamed middleware) wires `applyRateLimit` into the request lifecycle. See [Rate Limiting](./rate-limiting.md) for the layered model.
 
@@ -116,6 +118,23 @@ report-uri /api/csp-report;
 ```
 
 The nonce is generated in `proxy.ts` per request and forwarded via the `x-nonce` request header. The base `PRODUCTION_CSP` config defines `script-src 'self'`; `getCSPConfig(nonce)` appends `'nonce-{nonce}'` at runtime.
+
+### Invariant: production `script-src` never allows `eval`
+
+Development allows `'unsafe-eval'` because hot reload needs it. Production does not, and must not. So a client chunk that calls `eval` or `new Function` works in development and in tests, then fails **only in production**, with a CSP report (`blockedUri: eval` at `/api/csp-report`) from whatever page loads it.
+
+**Fix the import, never the policy.** Adding `'unsafe-eval'` back to `PRODUCTION_CSP` lets any injected script run arbitrary code, which is most of what the policy is for. The nonce does not help here: it allows tagged inline scripts, not `eval`. A fork cannot add it either: `lib/app/csp.ts` accepts only `https://` origins, and drops a keyword with a warning.
+
+Two tests hold this, both on the built header rather than the config object, since a regression can come in while the string is assembled: `tests/unit/lib/security/headers.test.ts` ("never allows eval in the production header", with and without a nonce) and `headers-app-csp.test.ts` (a fork listing `'unsafe-eval'`).
+
+**Usual sources:**
+
+- A client module that imports, however indirectly, a Node-only library or Node core (`crypto`, `vm`). The bundler substitutes browser shims, and `vm-browserify` implements `runInThisContext` with `eval`.
+- A library whose browser build compiles code with `new Function` (some spreadsheet, template and schema libraries do), reached through a shared barrel file.
+
+**Find the chunk.** Run `npx next analyze` (Next's Turbopack bundle analyser; Sunrise builds with Turbopack). Filter to the client environment and the affected route, then click a module to see the import chain that pulled it in. `npx next analyze --output` writes the analysis to `.next/diagnostics/analyze` instead of serving it. For a quick check after a production build, `grep -l -E "eval\(|new Function" .next/static/chunks/*.js` names the chunks. `@next/bundle-analyzer` does not apply: it is a webpack plugin.
+
+**Fence it off.** Put `import 'server-only'` at the top of a module that must never reach the browser. The Next build then fails the moment a client graph imports it, so the silent production-only break becomes a build error. Unit tests still import the module: `vitest.config.ts` aliases `server-only` to an empty stub (`tests/mocks/server-only.ts`), and the guarantee lives in the build. On client surfaces, import from the module directly rather than through a barrel, so a barrel never re-exports server code into a client bundle.
 
 ### CSP Usage
 

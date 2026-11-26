@@ -33,6 +33,10 @@ import { getRouteLogger } from '@/lib/api/context';
 import { logger } from '@/lib/logging';
 import { REASONING_EFFORTS } from '@/lib/orchestration/llm/types';
 import {
+  isStoredConfidentialPolicy,
+  isTighteningMode,
+} from '@/lib/orchestration/privacy/settings-policy';
+import {
   narrowProviderTools,
   narrowServiceTier,
   narrowVerbosity,
@@ -136,6 +140,20 @@ export const POST = withAdminAuth(
           inputGuardMode: guardModeSchema.parse(agent.inputGuardMode),
           outputGuardMode: guardModeSchema.parse(agent.outputGuardMode),
           citationGuardMode: guardModeSchema.parse(agent.citationGuardMode),
+          // A stored mode that is not one is left out, as the settings backup
+          // leaves one out: an overwriting import then keeps the target
+          // agent's own mode, and a new agent inherits the install's. The
+          // source agent refuses every call until a mode is chosen.
+          ...(agent.privacyMode === null || isTighteningMode(agent.privacyMode)
+            ? { privacyMode: agent.privacyMode }
+            : {}),
+          // The same for the confidential-content policies (§130).
+          ...(isStoredConfidentialPolicy(agent.privacyConfidentialPersonal)
+            ? { privacyConfidentialPersonal: agent.privacyConfidentialPersonal }
+            : {}),
+          ...(isStoredConfidentialPolicy(agent.privacyConfidentialCommercial)
+            ? { privacyConfidentialCommercial: agent.privacyConfidentialCommercial }
+            : {}),
           maxHistoryTokens: agent.maxHistoryTokens,
           maxHistoryMessages: agent.maxHistoryMessages,
           retentionDays: agent.retentionDays,

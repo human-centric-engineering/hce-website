@@ -456,7 +456,7 @@ The tool loop is a bounded while-loop (`MAX_TOOL_ITERATIONS = 5`). Each iteratio
 6. If no tool call: yields `done` and returns.
 7. If tool calls: increments the per-turn cost accumulator via `calculateCost(model, inputTokens, outputTokens)` BEFORE the fire-and-forget `logCost` write (so enforcement never depends on the DB write completing), then **per-turn cap check** (see below), then **re-checks monthly budget** via `checkBudget(agentId)` — prevents multi-tool conversations from exceeding budget mid-stream. Then dispatches via `capabilityDispatcher.dispatch` (wrapped in a 30-second timeout — see below), yields `capability_result`, persists `role: 'tool'` rows, invalidates the locked context if one is bound, and either returns (on `skipFollowup`) or loops.
 
-Hitting the cap emits `{ type: 'error', code: 'tool_loop_cap' }` and logs a warn.
+Hitting the cap saves an error marker (see [Orphaned Message Prevention](#orphaned-message-prevention)), emits `{ type: 'error', code: 'tool_loop_cap' }` and logs a warn.
 
 ### Per-turn cost cap (improvement #39 — runaway-loop guard)
 
@@ -611,7 +611,7 @@ export function initAppGuardEventContributors(): void {
 
 When the rows after the stored summary exceed the effective message-count cap (`AiAgent.maxHistoryMessages ?? MAX_HISTORY_MESSAGES`, default 50), the streaming handler represents the messages that fall out with a concise LLM summary instead of silently truncating them. This preserves the original problem, key decisions, and important context across long conversations.
 
-**History is read from the summary's pin onward.** The history read does not take "the newest N rows and hope the summary's pin is among them". With a stored summary it reads the rows strictly after `summaryUpToMessageId` (oldest first, at most `HISTORY_LOAD_LIMIT` = 200 per read); without one, or when the pin's row no longer exists, it reads the newest 200. So the summary always sees every row after the point it covers, however many a turn wrote (one parallel tool dispatch saves a row per call), and no headroom or clamp is needed to protect the pin. Verbatim memory is therefore at most `HISTORY_LOAD_LIMIT` however high `maxHistoryMessages` is (the field allows 500); the summary describes everything before (#655).
+**History is read from the summary's pin onward.** The history read does not take "the newest N rows and hope the summary's pin is among them". With a stored summary it reads the rows strictly after `summaryUpToMessageId` (oldest first, at most `HISTORY_LOAD_LIMIT` = 200 per read); without one, or when the pin's row no longer exists, it reads the newest 200. So the summary always sees every row after the point it covers, however many a turn wrote (one parallel tool dispatch saves a row per call), and no headroom or clamp is needed to protect the pin. Two kinds of row are dropped from what is read, by one check (`isLeftOutOfHistory`, `lib/orchestration/chat/message-builder.ts`) made in code because both flags live in the JSON `metadata` column: error markers (`metadata.error`), and the rows of a turn the LLM privacy layer refused under `block` (`metadata.excludedFromHistory`, set by the handler on every row that turn persisted, and on every row of an earlier exchange the refusal found the details in; see [LLM privacy layer → t-1014](../privacy/llm-privacy-layer.md#what-is-built-t-1014) and [t-1017](../privacy/llm-privacy-layer.md#what-is-built-t-1017)). A stored summary such a refusal found them in is replaced by its gap note alone, and its pin kept, so the rows it covered are not read again. Both are dropped before the summariser sees the rows, so a summary never carries either forward; both stay in the transcript. Verbatim memory is therefore at most `HISTORY_LOAD_LIMIT` however high `maxHistoryMessages` is (the field allows 500); the summary describes everything before (#655).
 
 **More than `HISTORY_LOAD_LIMIT` rows after the pin** (a long summariser outage, or a run of tool-heavy turns): the handler folds forward in **catch-up passes**, inline, before the reply streams. Each pass summarises the oldest rows of what was read — at most `SUMMARY_CATCHUP_MESSAGES` (100) and at most `SUMMARY_CHUNK_MAX_CHARS` (250,000) characters once each row is clipped to `SUMMARY_ROW_MAX_CHARS` (2,000), so one huge tool-result row cannot make a call that always fails (the ordinary summarisation obeys the same budget, and when every row is long it stops short and the next turn continues from the pin it persisted) — with the stored text's body as `previousSummary`, persists the new pin, and reads again. The summary always covers a contiguous prefix; nothing is skipped. A run of nothing but error markers just moves the pin past them.
 
@@ -646,7 +646,7 @@ Because the boundary moves every turn, staying reusable means summarising **past
 
 **Extension keeps the cost proportional to what was added**, not to the length of the conversation — and it is what lets the summary outlive the rows: the stored text is folded forward, never re-derived or discarded.
 
-**Budget:** the `routing` task-type model (budget tier, e.g. Haiku) via `getDefaultModelForTask('routing')`, capped at `maxTokens: 500`.
+**Budget:** the `routing` task-type model (budget tier, e.g. Haiku) via `getDefaultModelPinForTask('routing')` (on the conversation's provider; one naming another gives way to the conversation's model, §136 t-1068), capped at `maxTokens: 500`.
 
 <a id="cost-attribution"></a>**Cost attribution:** logged as a `CHAT` operation against the **real** `agent.id` and `conversation.id`, with `metadata.kind = 'conversation_summary'` so analytics can separate summarisation from turns a user asked for. `operation` stays `CHAT` because it is a chat completion billed to that agent. Until #654 this row carried the literals `'system'` and `'summary'` — both columns are foreign keys, so every insert was rejected with P2003, swallowed by `logCost`, and the spend appeared only on the provider invoice.
 
@@ -661,8 +661,9 @@ Per-user-per-agent persistent memory that survives across conversations. Stored 
 **How it works:**
 
 1. Before building the message array, the handler loads all memories for `(request.userId, agent.id)` from `AiUserMemory`, ordered by `updatedAt DESC`, capped at 50 entries.
-2. If memories exist, they're injected as a `[User memories]` system message after the context block but before conversation history. Format: `- key: value` per entry.
+2. If memories exist, they're injected after the context block but before conversation history: a `[User memories]` heading, then one system message per memory, formatted `- key: value`. Joined, they read as one block; they are separate so a refusal under the privacy layer's `block` mode can say which memory held personal details.
 3. Agents read/write memories via two built-in capabilities: `read_user_memory` and `write_user_memory`.
+4. Under the privacy layer's `block` mode, a turn refused because a memory held personal details **deletes that memory** and ends as `privacy_blocked_memory`, so the user's next turn goes on. See [LLM privacy layer → t-1018](../privacy/llm-privacy-layer.md#what-is-built-t-1018).
 
 **An embed widget visitor has no memory** (#705, t-765). Both capabilities refuse a visitor with `anonymous_visitor`, and the load in step 1 finds no rows under a visitor id. The visitor id is a hash of the embed token and the client IP, so remembering per visitor would read one person's memories back to everyone sharing their address. See [`embed.md`](./embed.md#a-visitor-is-not-a-user).
 
@@ -726,7 +727,7 @@ Three internal modules under `lib/orchestration/chat/` are not exported from the
 - Primary export: `summarizeMessages(messages, providerSlug, fallbackSlugs, options?)` returning a `SummarizeResult`.
 - `options.previousSummary` switches it from _summarise_ to **extend**: the prior text and the delta go to the model together, under a prompt that requires the earlier content to be carried forward rather than replaced. `options.agentId` / `options.conversationId` attribute the cost row.
 - Called by the handler from the [Rolling Conversation Summary](#rolling-conversation-summary) flow once the rows after the stored summary's pin exceed the cap (`agent.maxHistoryMessages ?? MAX_HISTORY_MESSAGES`), and by the catch-up passes when more than `HISTORY_LOAD_LIMIT` rows follow the pin.
-- Runs on the **`routing` task-type model** (budget tier, e.g. Haiku) resolved via `getDefaultModelForTask('routing')` in the LLM settings resolver. Capped at `maxTokens: 500`.
+- Runs on the **`routing` task-type model** (budget tier, e.g. Haiku) resolved via `getDefaultModelPinForTask('routing')` in the LLM settings resolver, and always on the conversation's provider and fallbacks: when that default names another provider (`provider::model`, §136 t-1068), the summary is made with the conversation's own model instead, so a conversation's history never goes somewhere its agent does not send it. Capped at `maxTokens: 500`.
 - Logs cost as a `CostOperation.CHAT` row against the caller's real agent and conversation, tagged `metadata.kind = 'conversation_summary'`. Both columns are foreign keys — pass a real row id or pass nothing; a placeholder is rejected and swallowed (#654).
 - **Never throws.** Any failure (provider down, LLM error, empty response) returns `fellBack: true` with `previousSummary` if there is one, and `FALLBACK_MESSAGE = '[Summary unavailable — earlier messages omitted]'` otherwise, so the chat turn keeps moving and a good summary is never destroyed by a bad call.
 - Prompt is a fixed system message telling the model to produce a third-person summary covering the original problem, key decisions, facts/constraints, and current state.
@@ -741,7 +742,7 @@ Three internal modules under `lib/orchestration/chat/` are not exported from the
 ### `message-embedder.ts` — async embedding for semantic search
 
 - `queueMessageEmbedding(messageId, content)` — fire-and-forget. Called after writing an assistant `AiMessage` row; returns immediately and runs the actual embed on a detached promise. Failures are logged but never surfaced to the chat stream. Messages shorter than 20 chars are skipped.
-- `backfillMissingEmbeddings(batchSize = 25)` — called from the unified maintenance tick (see [`scheduling.md`](./scheduling.md#unified-maintenance-tick-admin-auth-or-cron-secret-preferred)). Finds assistant messages without a matching `AiMessageEmbedding` row (via `LEFT JOIN`) and re-embeds up to `batchSize` entries per invocation.
+- `backfillMissingEmbeddings(batchSize = 25)` — called from the unified maintenance tick (see [`scheduling.md`](./scheduling.md#unified-maintenance-tick-admin-auth-or-cron-secret-preferred)). Finds assistant messages without a matching `AiMessageEmbedding` row (via `LEFT JOIN`) and re-embeds up to `batchSize` entries per invocation: replies whose embedding never failed first, newest first, then those whose retry time (`AiMessage.embeddingRetryAt`) has come. Any failed or refused attempt, on either path, sets that time: 15 minutes after the first failure (one backfill interval), doubling each time, at most a week. See [LLM privacy layer → Embeddings](../privacy/llm-privacy-layer.md) (t-1016).
 - Internally `generateAndStoreEmbedding` truncates content above 8000 chars (cost control) and upserts through a raw `INSERT ... ON CONFLICT` so double-invocations are idempotent.
 - Powers `POST /conversations/search` (pgvector semantic search) — without the embedder those endpoints return empty results. See [`orchestration-conversations.md`](../admin/orchestration-conversations.md).
 
@@ -894,12 +895,26 @@ This differs from the initial provider fallback (`getProviderWithFallbacks`) whi
 
 ### Orphaned Message Prevention
 
-When all providers fail (error propagates to the outer catch), an **error-marker assistant message** is persisted to prevent an orphaned user message in the conversation:
+The user's message is saved before the input guard and the tool loop, so every turn that ends in an error after that point saves an **error-marker assistant message**. Without one, the question reloads with no answer at all, in admin chat, the embed widget, the consumer API, the trace and the conversations list.
 
-- `role: 'assistant'`, `content: '[An error occurred and the response could not be completed.]'`
-- `metadata: { error: true, errorCode: 'internal_error' }`
-- Only persisted when `conversationId` is set (i.e. the conversation was created before the failure)
-- Persist failure is caught and logged — it never masks the original error
+The endings that save one, each with its own `errorCode`:
+
+| Ending                                                                                                                                          | Where                                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| A thrown failure: a provider error (fallbacks exhausted, truncation, a spend cap), a crash                                                      | the outer catch (`internal_error` for a crash) |
+| A privacy refusal under `block` (`privacy_blocked*`, `privacy_confidential*`)                                                                   | the outer catch, after leaving the turn out    |
+| `input_blocked` (input guard in `block`)                                                                                                        | before the tool loop                           |
+| `tool_loop_cap`                                                                                                                                 | after the tool loop                            |
+| A budget refusal at the re-check between tool calls (`budget_exceeded` and the other cap codes), which also sends the `budget_exceeded` webhook | in the loop, for a non-local provider          |
+| `output_blocked` (output guard in `block`)                                                                                                      | in the loop, terminal turn                     |
+| `citation_required` (citation guard in `block`)                                                                                                 | in the loop, terminal turn                     |
+
+- `role: 'assistant'`, `content: '[An error occurred and the response could not be completed.]'`, `metadata: { error: true, errorCode, privacy? }`. The text is fixed: a blocked reply is never saved, in the marker or anywhere else.
+- One helper (`persistErrorMarker`) saves it on every ending. An in-try ending goes through `endWithError(code, message)`, which saves it and then returns the event to yield, so the row is saved **before** the `error` event: a client that stops reading at the error (the embed widget does) still leaves it saved (t-1040). A new ending after the user's message must use it, never a bare `yield errorEvent(...)`.
+- Only persisted when `conversationId` is set, that is once the conversation exists, so a marker can stand without a question before it: an opening turn saves no user row, and a failure thrown between creating the conversation and saving the user's message (that write itself failing, say) still reaches the catch. The `ChatError` endings (`agent_not_found`, `conversation_not_found`, the conversation caps) and the refusal of a reached budget before the turn come before the user's message is saved, and save none.
+- Persist failure is caught and logged — it never masks the original error.
+- Every history reader and the summariser leave markers out (`isLeftOutOfHistory`), so the model never sees one. A marker is still a stored row, so it counts toward `maxMessagesPerConversation`.
+- The per-turn cost cap is not an error ending: it saves the partial reply with `endedReason: 'budget_exceeded'` instead (see [Per-turn cost cap](#per-turn-cost-cap-improvement-39--runaway-loop-guard)).
 
 ## Conversation and Message Caps
 

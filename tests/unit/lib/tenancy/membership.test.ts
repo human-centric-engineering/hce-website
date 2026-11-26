@@ -9,8 +9,10 @@
  * - `membershipForNewUser` — the one answer for `(user, invitation)`, with the
  *   case t-669 found missing: an invitation that GRANTS platform ADMIN must
  *   make its user the install org's OWNER even though the row was created
- *   as USER. And the per-org bootstrap: the first member of a non-install
- *   org is its OWNER, whatever the invitation said.
+ *   as USER. And the per-org bootstrap: the first person who isn't platform
+ *   staff to join a non-install org is its OWNER, whatever the invitation said —
+ *   staff already in the org don't stop it (#1178), and any non-staff member,
+ *   an ADMIN included, does.
  * - `activeOrgForSession` — the four arms, and the self-heal, which must
  *   write for a memberless user and must NOT write for anyone else.
  *
@@ -18,7 +20,7 @@
  * so a new query shows up as a TypeError rather than an unexplained pass.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import { INSTALL_ORG_ID } from '@/lib/tenancy/constants';
 import {
   DEFAULT_ORG_ROLE,
@@ -29,9 +31,16 @@ import {
 import { PLATFORM_ADMIN_ROLE, DEFAULT_USER_ROLE } from '@/lib/auth/roles';
 
 vi.mock('@/lib/db/client', () => ({ prisma: {} }));
-const mockEnv = vi.hoisted((): { TENANCY_MODE: 'single' | 'multi' } => ({
-  TENANCY_MODE: 'single',
-}));
+const mockEnv = vi.hoisted(
+  (): {
+    TENANCY_MODE: 'single' | 'multi';
+    REQUIRE_EMAIL_VERIFICATION?: boolean;
+    NODE_ENV: string;
+  } => ({
+    TENANCY_MODE: 'single',
+    NODE_ENV: 'test',
+  })
+);
 vi.mock('@/lib/env', () => ({ env: mockEnv }));
 
 import {
@@ -45,6 +54,7 @@ import {
   membershipsFromSignupRecord,
   signupRecordFor,
   undecidedMembershipsForNewUser,
+  releaseFoundedSignupOrgs,
   writeNewUserMemberships,
 } from '@/lib/tenancy/membership';
 
@@ -65,20 +75,75 @@ const mocks = {
   // The batch form: every operation was already issued, so the transaction is
   // their settlement. A rejected one rejects it, as Prisma's does.
   $transaction: vi.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+  // Removing a signup org's awaiting-founder mark (t-1062): rows changed.
+  $executeRaw: vi.fn(() => Promise.resolve(0)),
+  // Releasing founded signup orgs (t-1062): the rows released.
+  $queryRaw: vi.fn(() => Promise.resolve([] as unknown[])),
 };
 // These delegates' methods are all these functions call; anything else is a
 // TypeError at the call site, which is the point of not mocking more.
 const db = mocks as unknown as Pick<
   PrismaClient,
-  'orgMembership' | 'user' | 'org' | '$transaction'
+  'orgMembership' | 'user' | 'org' | '$transaction' | '$executeRaw' | '$queryRaw'
 >;
 
 const OTHER_ORG = 'cmorg000000000000000other';
 const USER_ID = 'cmuser00000000000000user1';
 
+/** A `Prisma.sql` fragment's text, `?` for each value, and its values. */
+function sqlText(fragment: unknown): string {
+  expect(fragment).toHaveProperty('strings');
+  return (fragment as Prisma.Sql).strings.join('?').replace(/\s+/g, ' ').trim();
+}
+function sqlValues(fragment: unknown): unknown[] {
+  return (fragment as Prisma.Sql).values;
+}
+/** Who issued the invitation: the bootstrap asks for their owner standing. */
+const ISSUER = 'cmuser0000000000000issuer';
+const BY_ISSUER = { invitedBy: ISSUER };
+
+/** The issuer's platform role, and their role in the invited org (none ⇒ not a member). */
+function issuerIs(platformRole: string, orgRole: OrgRole | null = null): void {
+  mocks.user.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+    Promise.resolve(
+      where.id === ISSUER
+        ? { role: platformRole, orgMemberships: orgRole ? [{ role: orgRole }] : [] }
+        : null
+    )
+  );
+}
+
+/** A membership row as the fake count reads it; `staff` marks a platform admin's. */
+interface FakeMember {
+  orgId: string;
+  role: OrgRole;
+  staff?: boolean;
+}
+
+/**
+ * Answer `orgMembership.count` from these rows, honouring the `where` it is
+ * given (a `role` filter, and a `user` filter that keeps only non-staff
+ * rows) — so a test proves which
+ * members the bootstrap counts, not only what a fixed number makes it do.
+ */
+function orgHas(rows: FakeMember[]): void {
+  mocks.orgMembership.count.mockImplementation(
+    ({ where }: { where: { orgId: string; role?: string; user?: unknown } }) =>
+      Promise.resolve(
+        rows.filter(
+          (r) =>
+            r.orgId === where.orgId &&
+            (!where.role || r.role === where.role) &&
+            (!where.user || !r.staff)
+        ).length
+      )
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockEnv.TENANCY_MODE = 'single';
+  delete mockEnv.REQUIRE_EMAIL_VERIFICATION;
   mocks.orgMembership.count.mockResolvedValue(0);
   mocks.orgMembership.findMany.mockResolvedValue([]);
   mocks.orgMembership.upsert.mockResolvedValue(undefined);
@@ -169,7 +234,10 @@ describe('membershipForNewUser', () => {
   );
 
   it('an invitation naming another org lands there with its orgRole, MEMBER by default', async () => {
-    mocks.orgMembership.count.mockResolvedValue(3);
+    orgHas([
+      { orgId: OTHER_ORG, role: ORG_OWNER_ROLE },
+      { orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE },
+    ]);
     const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
 
     expect(await membershipForNewUser(row, { orgId: OTHER_ORG }, db)).toEqual({
@@ -179,16 +247,237 @@ describe('membershipForNewUser', () => {
     expect(
       await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: ORG_ADMIN_ROLE }, db)
     ).toEqual({ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE });
-    expect(mocks.orgMembership.count).toHaveBeenCalledWith({ where: { orgId: OTHER_ORG } });
+    expect(mocks.orgMembership.count).toHaveBeenCalledWith({
+      where: {
+        orgId: OTHER_ORG,
+        user: { role: { not: PLATFORM_ADMIN_ROLE }, NOT: { accountType: 'SERVICE' } },
+      },
+    });
   });
 
   it('the first member of a new org is its OWNER, whatever the invitation said', async () => {
     mocks.orgMembership.count.mockResolvedValue(0);
+    issuerIs(PLATFORM_ADMIN_ROLE);
     const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
 
     expect(
-      await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE }, db)
+      await membershipForNewUser(
+        row,
+        { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE, ...BY_ISSUER },
+        db
+      )
     ).toEqual({ orgId: OTHER_ORG, role: ORG_OWNER_ROLE });
+  });
+
+  // Code review of #1178: an org ADMIN could invite a second account of
+  // theirs, then remove every other non-staff member and leave, so the count
+  // is 0 again at acceptance. The issuer's owner standing is asked then.
+  it('the bootstrap needs its issuer to hold owner standing when the invitation is accepted', async () => {
+    orgHas([{ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE, staff: true }]);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+    const invitation = { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE, ...BY_ISSUER };
+
+    // An issuer who has left the org (or was only ever its ADMIN): none.
+    issuerIs(DEFAULT_USER_ROLE);
+    expect(await membershipForNewUser(row, invitation, db)).toEqual({
+      orgId: OTHER_ORG,
+      role: DEFAULT_ORG_ROLE,
+    });
+    issuerIs(DEFAULT_USER_ROLE, ORG_ADMIN_ROLE);
+    expect((await membershipForNewUser(row, invitation, db)).role).toBe(DEFAULT_ORG_ROLE);
+    // No issuer named: none.
+    expect(
+      (await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE }, db)).role
+    ).toBe(DEFAULT_ORG_ROLE);
+    // An OWNER of the org, or a platform admin: standing.
+    issuerIs(DEFAULT_USER_ROLE, ORG_OWNER_ROLE);
+    expect((await membershipForNewUser(row, invitation, db)).role).toBe(ORG_OWNER_ROLE);
+    issuerIs(PLATFORM_ADMIN_ROLE);
+    expect((await membershipForNewUser(row, invitation, db)).role).toBe(ORG_OWNER_ROLE);
+    expect(mocks.user.findUnique).toHaveBeenCalledWith({
+      where: { id: ISSUER },
+      select: {
+        role: true,
+        orgMemberships: { where: { orgId: OTHER_ORG }, select: { role: true } },
+      },
+    });
+  });
+
+  // The standing is asked only when it could matter: with a non-staff member
+  // in the org the bootstrap is off, and an invited signup pays no extra read.
+  it('does not read the issuer when the org already has a non-staff member', async () => {
+    orgHas([{ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE, staff: false }]);
+    issuerIs(PLATFORM_ADMIN_ROLE);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+
+    expect(
+      await membershipForNewUser(
+        row,
+        { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE, ...BY_ISSUER },
+        db
+      )
+    ).toEqual({ orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE });
+    expect(mocks.user.findUnique).not.toHaveBeenCalled();
+  });
+
+  // #1178: a vendor's staff can be in an org as ADMIN, preparing it, before
+  // its first real person arrives. Counting every member, that org was not
+  // empty, so its first real person landed as MEMBER and nobody owned it.
+  it('the first non-staff member of an org that has only staff in it is its OWNER (#1178)', async () => {
+    orgHas([{ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE, staff: true }]);
+    issuerIs(PLATFORM_ADMIN_ROLE);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+
+    expect(
+      await membershipForNewUser(
+        row,
+        { orgId: OTHER_ORG, orgRole: DEFAULT_ORG_ROLE, ...BY_ISSUER },
+        db
+      )
+    ).toEqual({ orgId: OTHER_ORG, role: ORG_OWNER_ROLE });
+  });
+
+  it('once the org has an OWNER, the next non-staff member gets the invitation’s role', async () => {
+    orgHas([
+      { orgId: OTHER_ORG, role: ORG_ADMIN_ROLE, staff: true },
+      { orgId: OTHER_ORG, role: ORG_OWNER_ROLE },
+    ]);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+
+    expect(
+      await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: ORG_ADMIN_ROLE }, db)
+    ).toEqual({ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE });
+  });
+
+  it('an org whose only OWNER is staff still makes its first non-staff member an OWNER', async () => {
+    // Staff don't count, whatever their org role: the client's first person
+    // owns the org beside them, and removes them when the org goes self-run.
+    orgHas([{ orgId: OTHER_ORG, role: ORG_OWNER_ROLE, staff: true }]);
+    issuerIs(PLATFORM_ADMIN_ROLE);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+
+    expect(await membershipForNewUser(row, { orgId: OTHER_ORG, ...BY_ISSUER }, db)).toEqual({
+      orgId: OTHER_ORG,
+      role: ORG_OWNER_ROLE,
+    });
+  });
+
+  // Security review of #1178: the trigger is not "no OWNER yet". An org whose
+  // last owner was erased keeps its ADMINs, and an ADMIN may invite without
+  // owner standing — under "no owner yet" they would choose the next owner.
+  it('an org with no OWNER but a non-staff ADMIN gives an invitee the invitation’s role', async () => {
+    orgHas([{ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE }]);
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+
+    expect(
+      await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: ORG_ADMIN_ROLE }, db)
+    ).toEqual({ orgId: OTHER_ORG, role: ORG_ADMIN_ROLE });
+  });
+
+  // #1235: an OWNER invitation's issuer standing was checked only when it was
+  // issued. An owner who invited a second account as OWNER, then was demoted
+  // or removed, could still have it accepted as OWNER. It is asked again now.
+  describe('an explicit OWNER invitation (#1235)', () => {
+    const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+    const ownerInvitation = { orgId: OTHER_ORG, orgRole: ORG_OWNER_ROLE, ...BY_ISSUER };
+
+    beforeEach(() => {
+      // The org has another owner, so the first-owner bootstrap is off and
+      // only the explicit role is in play.
+      orgHas([{ orgId: OTHER_ORG, role: ORG_OWNER_ROLE }]);
+    });
+
+    it.each([
+      ['demoted to ADMIN', DEFAULT_USER_ROLE, ORG_ADMIN_ROLE],
+      ['demoted to MEMBER', DEFAULT_USER_ROLE, DEFAULT_ORG_ROLE],
+      ['removed from the org', DEFAULT_USER_ROLE, null],
+    ] as const)(
+      'confers MEMBER when its issuer has been %s',
+      async (_case, platformRole, orgRole) => {
+        issuerIs(platformRole, orgRole);
+        expect(await membershipForNewUser(row, ownerInvitation, db)).toEqual({
+          orgId: OTHER_ORG,
+          role: DEFAULT_ORG_ROLE,
+        });
+        expect(mocks.user.findUnique).toHaveBeenCalledWith({
+          where: { id: ISSUER },
+          select: {
+            role: true,
+            orgMemberships: { where: { orgId: OTHER_ORG }, select: { role: true } },
+          },
+        });
+      }
+    );
+
+    it('confers MEMBER when its issuer no longer exists, or none is named', async () => {
+      // issuerIs not called: findUnique answers null, as for a deleted user.
+      expect((await membershipForNewUser(row, ownerInvitation, db)).role).toBe(DEFAULT_ORG_ROLE);
+      expect(
+        (await membershipForNewUser(row, { orgId: OTHER_ORG, orgRole: ORG_OWNER_ROLE }, db)).role
+      ).toBe(DEFAULT_ORG_ROLE);
+    });
+
+    it('still confers OWNER while its issuer is an OWNER of the org, or a platform admin', async () => {
+      issuerIs(DEFAULT_USER_ROLE, ORG_OWNER_ROLE);
+      expect(await membershipForNewUser(row, ownerInvitation, db)).toEqual({
+        orgId: OTHER_ORG,
+        role: ORG_OWNER_ROLE,
+      });
+      issuerIs(PLATFORM_ADMIN_ROLE);
+      expect((await membershipForNewUser(row, ownerInvitation, db)).role).toBe(ORG_OWNER_ROLE);
+    });
+
+    it('does not read the issuer for an invitation naming a role below OWNER', async () => {
+      issuerIs(DEFAULT_USER_ROLE);
+      expect(
+        (await membershipForNewUser(row, { ...ownerInvitation, orgRole: ORG_ADMIN_ROLE }, db)).role
+      ).toBe(ORG_ADMIN_ROLE);
+      expect(mocks.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('leaves the install org alone: its role follows the platform role', async () => {
+      expect(
+        await membershipForNewUser(row, { ...ownerInvitation, orgId: INSTALL_ORG_ID }, db)
+      ).toEqual({ orgId: INSTALL_ORG_ID, role: DEFAULT_ORG_ROLE });
+      expect(mocks.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('reaches the new-account path, membershipsForNewUser, the same way', async () => {
+      issuerIs(DEFAULT_USER_ROLE, ORG_ADMIN_ROLE);
+      expect((await membershipsForNewUser(row, ownerInvitation, db)).membership).toEqual({
+        orgId: OTHER_ORG,
+        role: DEFAULT_ORG_ROLE,
+      });
+    });
+  });
+
+  it('platform staff never take the bootstrap, judged on the role granted or the account’s own', async () => {
+    orgHas([]);
+    issuerIs(PLATFORM_ADMIN_ROLE);
+    const newRow = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
+    const adminAccount = { role: PLATFORM_ADMIN_ROLE, accountType: 'HUMAN' };
+
+    // A new account the invitation makes a platform ADMIN (its row is still USER).
+    expect(
+      await membershipForNewUser(
+        newRow,
+        { role: PLATFORM_ADMIN_ROLE, orgId: OTHER_ORG, ...BY_ISSUER },
+        db
+      )
+    ).toEqual({ orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE });
+    // An existing platform ADMIN accepting an org invitation, which always names USER.
+    expect(
+      await membershipForNewUser(
+        adminAccount,
+        { role: DEFAULT_USER_ROLE, orgId: OTHER_ORG, ...BY_ISSUER },
+        db
+      )
+    ).toEqual({ orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE });
+    // Control: the same empty org makes a non-staff newcomer its OWNER.
+    expect(await membershipForNewUser(newRow, { orgId: OTHER_ORG, ...BY_ISSUER }, db)).toEqual({
+      orgId: OTHER_ORG,
+      role: ORG_OWNER_ROLE,
+    });
   });
 
   it('the per-org bootstrap does not apply to the install org', async () => {
@@ -205,7 +494,7 @@ describe('membershipForNewUser', () => {
 
   it('a platform ADMIN invited into another org is a plain member there', async () => {
     // The platform role decides the INSTALL org's role only.
-    mocks.orgMembership.count.mockResolvedValue(2);
+    orgHas([{ orgId: OTHER_ORG, role: ORG_OWNER_ROLE }]);
     const row = { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' };
 
     expect(
@@ -392,10 +681,11 @@ describe('backfillInstallMemberships (t-835)', () => {
     },
     org: { findUnique: vi.fn(async () => ({ id: OTHER_ORG })) },
     $transaction: vi.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+    $executeRaw: vi.fn(async () => 0),
   };
   const storeDb = store as unknown as Pick<
     PrismaClient,
-    'orgMembership' | 'user' | 'org' | '$transaction'
+    'orgMembership' | 'user' | 'org' | '$transaction' | '$executeRaw'
   >;
 
   beforeEach(() => {
@@ -522,6 +812,17 @@ describe('undecidedMembershipsForNewUser', () => {
     ).toEqual({ membership: { orgId: OTHER_ORG, role: ORG_ADMIN_ROLE } });
   });
 
+  // The issuer's standing could not be read, so an OWNER invitation narrows
+  // (#1235): a failure never widens a role.
+  it('narrows an OWNER invitation to MEMBER, since the issuer’s standing is unknown', () => {
+    expect(
+      undecidedMembershipsForNewUser(
+        { role: DEFAULT_USER_ROLE, accountType: 'HUMAN' },
+        { ...invitation, orgRole: ORG_OWNER_ROLE }
+      ).membership
+    ).toEqual({ orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE });
+  });
+
   it('with no invited org, keeps the install-org rule on the role the invitation grants', () => {
     expect(
       undecidedMembershipsForNewUser(
@@ -583,6 +884,28 @@ describe('the signup record (t-838)', () => {
     expect(mocks.user.update).toHaveBeenCalledWith({ where: { id: USER_ID }, data: cleared });
   });
 
+  it('healSignupRecord answers the signup org it founded, only for an OWNER record (t-1062)', async () => {
+    mocks.org.findUnique.mockResolvedValue({ id: OTHER_ORG });
+    mocks.$executeRaw.mockResolvedValue(1);
+
+    mocks.user.findUnique.mockResolvedValue({
+      ...human,
+      signupOrgId: OTHER_ORG,
+      signupOrgRole: ORG_OWNER_ROLE,
+    });
+    expect(await healSignupRecord(USER_ID, db)).toBe(OTHER_ORG);
+
+    // A member, not the founder: the mark is never touched.
+    mocks.$executeRaw.mockClear();
+    mocks.user.findUnique.mockResolvedValue({
+      ...human,
+      signupOrgId: OTHER_ORG,
+      signupOrgRole: ORG_ADMIN_ROLE,
+    });
+    expect(await healSignupRecord(USER_ID, db)).toBeNull();
+    expect(mocks.$executeRaw).not.toHaveBeenCalled();
+  });
+
   it('healSignupRecord writes nothing for a user with no record', async () => {
     mocks.user.findUnique.mockResolvedValue({ ...human, signupOrgId: null, signupOrgRole: null });
 
@@ -608,7 +931,10 @@ describe('the signup record (t-838)', () => {
 
     expect(mocks.$transaction).toHaveBeenCalledTimes(1);
     const [ops] = mocks.$transaction.mock.calls[0];
+    // Both memberships and the cleared record: an ADMIN membership never
+    // founds a signup org, so there is no awaiting-founder clear (t-1062).
     expect(ops).toHaveLength(3);
+    expect(mocks.$executeRaw).not.toHaveBeenCalled();
     expect(mocks.orgMembership.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: { orgId: OTHER_ORG, userId: USER_ID, role: ORG_ADMIN_ROLE },
@@ -620,6 +946,71 @@ describe('the signup record (t-838)', () => {
       })
     );
     expect(mocks.user.update).toHaveBeenCalledWith({ where: { id: USER_ID }, data: cleared });
+  });
+
+  it('removes the org’s awaiting-founder mark in the same transaction, and reports the org it founded (t-1062)', async () => {
+    mocks.$executeRaw.mockResolvedValueOnce(1);
+
+    const result = await writeNewUserMemberships(
+      USER_ID,
+      { membership: { orgId: OTHER_ORG, role: ORG_OWNER_ROLE } },
+      db
+    );
+
+    expect(result).toEqual({ founded: OTHER_ORG });
+    const [ops] = mocks.$transaction.mock.calls[0];
+    expect(ops).toHaveLength(3);
+    // The clear is conditional on the mark and names the membership's org.
+    const [sql, ...params] = mocks.$executeRaw.mock.calls[0] as unknown as [
+      TemplateStringsArray,
+      ...unknown[],
+    ];
+    expect(sql.join('?')).toMatch(
+      /UPDATE org[\s\S]*settings - [\s\S]*WHERE id = \?[\s\S]*settings \? \?/
+    );
+    // No verification required: nothing more is asked of the founder.
+    expect(params.slice(0, 3)).toEqual(['awaitingFounder', OTHER_ORG, 'awaitingFounder']);
+    expect(sqlText(params[3])).toBe('TRUE');
+  });
+
+  it('where verification is required, removes the mark only for a founder whose address is verified (t-1062)', async () => {
+    mockEnv.REQUIRE_EMAIL_VERIFICATION = true;
+
+    await writeNewUserMemberships(
+      USER_ID,
+      { membership: { orgId: OTHER_ORG, role: ORG_OWNER_ROLE } },
+      db
+    );
+
+    const [, , , , canAct] = mocks.$executeRaw.mock.calls[0] as unknown as unknown[];
+    // Verified, or has had a session (OAuth, an accepted invitation).
+    expect(sqlText(canAct)).toMatch(
+      /^\(EXISTS \(SELECT 1 FROM "user" fu WHERE fu\.id = \? AND fu\."emailVerified"\) OR EXISTS \(SELECT 1 FROM session fs WHERE fs\."userId" = \?\)\)$/
+    );
+    expect(sqlValues(canAct)).toEqual([USER_ID, USER_ID]);
+  });
+
+  it('reports no founded org when the membership’s org carries no mark', async () => {
+    const result = await writeNewUserMemberships(
+      USER_ID,
+      { membership: { orgId: OTHER_ORG, role: DEFAULT_ORG_ROLE } },
+      db
+    );
+    expect(result).toEqual({ founded: null });
+  });
+
+  it('healSignupRecord removes the awaiting-founder mark of the org it grants (t-1062)', async () => {
+    mocks.user.findUnique.mockResolvedValue({
+      ...human,
+      signupOrgId: OTHER_ORG,
+      signupOrgRole: ORG_OWNER_ROLE,
+    });
+    mocks.org.findUnique.mockResolvedValue({ id: OTHER_ORG });
+
+    await healSignupRecord(USER_ID, db);
+
+    expect(mocks.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(mocks.$executeRaw.mock.calls[0]).toContain(OTHER_ORG);
   });
 
   it('a failed membership write fails the transaction, so the record is not reported cleared', async () => {
@@ -649,11 +1040,27 @@ describe('activeOrgForSession — healing from the signup record (t-838)', () =>
     mocks.orgMembership.findMany.mockResolvedValue([]);
   });
 
+  it('reports the signup org the heal founded, so the caller runs its setup (t-1062)', async () => {
+    mocks.user.findUnique.mockResolvedValue(recorded(OTHER_ORG, ORG_OWNER_ROLE));
+    mocks.org.findUnique.mockResolvedValue({ id: OTHER_ORG });
+    mocks.$executeRaw.mockResolvedValueOnce(1);
+
+    expect(await activeOrgForSession(USER_ID, db)).toEqual({
+      orgId: OTHER_ORG,
+      healed: true,
+      founded: OTHER_ORG,
+    });
+  });
+
   it('at multi, heals an invitee whose write failed into the org that invited them — not the install org', async () => {
     mocks.user.findUnique.mockResolvedValue(recorded(OTHER_ORG, ORG_ADMIN_ROLE));
     mocks.org.findUnique.mockResolvedValue({ id: OTHER_ORG });
 
-    expect(await activeOrgForSession(USER_ID, db)).toEqual({ orgId: OTHER_ORG, healed: true });
+    expect(await activeOrgForSession(USER_ID, db)).toEqual({
+      orgId: OTHER_ORG,
+      healed: true,
+      founded: null,
+    });
     expect(mocks.orgMembership.upsert).toHaveBeenCalledTimes(1);
     expect(mocks.orgMembership.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -671,7 +1078,11 @@ describe('activeOrgForSession — healing from the signup record (t-838)', () =>
     mocks.user.findUnique.mockResolvedValue(recorded(INSTALL_ORG_ID, DEFAULT_ORG_ROLE));
     mocks.org.findUnique.mockResolvedValue({ id: INSTALL_ORG_ID });
 
-    expect(await activeOrgForSession(USER_ID, db)).toEqual({ orgId: INSTALL_ORG_ID, healed: true });
+    expect(await activeOrgForSession(USER_ID, db)).toEqual({
+      orgId: INSTALL_ORG_ID,
+      healed: true,
+      founded: null,
+    });
     expect(mocks.orgMembership.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: { orgId: INSTALL_ORG_ID, userId: USER_ID, role: DEFAULT_ORG_ROLE },
@@ -703,7 +1114,11 @@ describe('activeOrgForSession — healing from the signup record (t-838)', () =>
     mocks.user.findUnique.mockResolvedValue(recorded(OTHER_ORG, ORG_ADMIN_ROLE));
     mocks.org.findUnique.mockResolvedValue({ id: OTHER_ORG });
 
-    expect(await activeOrgForSession(USER_ID, db)).toEqual({ orgId: OTHER_ORG, healed: true });
+    expect(await activeOrgForSession(USER_ID, db)).toEqual({
+      orgId: OTHER_ORG,
+      healed: true,
+      founded: null,
+    });
     expect(mocks.orgMembership.upsert).toHaveBeenCalledTimes(2);
     expect(mocks.orgMembership.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -724,5 +1139,56 @@ describe('activeOrgForSession — healing from the signup record (t-838)', () =>
 
     await activeOrgForSession(USER_ID, db);
     expect(mocks.user.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe('releaseFoundedSignupOrgs (§134 t-1062)', () => {
+  const released = [{ orgId: OTHER_ORG, ownerUserId: USER_ID }];
+
+  function statement(): { text: string; values: unknown[] } {
+    const [strings, ...values] = mocks.$queryRaw.mock.calls[0] as unknown as [
+      TemplateStringsArray,
+      ...unknown[],
+    ];
+    return { text: strings.join('?').replace(/\s+/g, ' '), values };
+  }
+
+  it('for one user: releases the marked orgs they own, in one conditional UPDATE … RETURNING', async () => {
+    mocks.$queryRaw.mockResolvedValueOnce(released);
+
+    expect(await releaseFoundedSignupOrgs({ userId: USER_ID }, db)).toEqual(released);
+
+    const { text, values } = statement();
+    expect(text).toMatch(/JOIN org_membership m ON m\."orgId" = o\.id AND m\.role = \?::"OrgRole"/);
+    expect(text).toMatch(/WHERE o\.settings \? \?/);
+    expect(text).toMatch(/UPDATE org SET settings = org\.settings - \?::text/);
+    // Re-tested on the row updated, so two callers cannot both release it.
+    expect(text).toMatch(/WHERE org\.id = founded\."orgId" AND org\.settings \? \? RETURNING/);
+    expect(values[0]).toBe(ORG_OWNER_ROLE);
+    expect(sqlText(values[2])).toBe('AND m."userId" = ?');
+    expect(sqlValues(values[2])).toEqual([USER_ID]);
+    expect(sqlText(values[3])).toBe('TRUE');
+  });
+
+  it('signing in: releases their orgs whatever the verification rule, since a session is being minted', async () => {
+    mockEnv.REQUIRE_EMAIL_VERIFICATION = true;
+
+    await releaseFoundedSignupOrgs({ userId: USER_ID, signingIn: true }, db);
+
+    expect(sqlText(statement().values[3])).toBe('TRUE');
+  });
+
+  it('for the job: only orgs created before the cutoff, and only a verified owner where verification is required', async () => {
+    mockEnv.REQUIRE_EMAIL_VERIFICATION = true;
+    const cutoff = new Date('2026-11-19T10:00:00Z');
+
+    await releaseFoundedSignupOrgs({ createdBefore: cutoff }, db);
+
+    const { values } = statement();
+    expect(sqlText(values[2])).toBe('AND o."createdAt" < ?');
+    expect(sqlValues(values[2])).toEqual([cutoff]);
+    // Each owner's own rows, not a bound value.
+    expect(sqlText(values[3])).toMatch(/fu\.id = m\."userId" AND fu\."emailVerified"/);
+    expect(sqlText(values[3])).toMatch(/fs\."userId" = m\."userId"/);
   });
 });

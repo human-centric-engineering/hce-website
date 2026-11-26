@@ -10,6 +10,7 @@ Sunrise includes a GDPR/PECR-compliant cookie consent system that gives users co
 - [API Reference](./api.md) - Hooks, functions, types, and exports
 - [Account Deletion & Right to Erasure](./data-erasure.md) - GDPR Art. 17 erasure, the erase-vs-retain data model, and `eraseUser()`
 - [Subject Access Export](./data-export.md) - GDPR Art. 15/20 access, the source manifest and its coverage guard, and `exportUserData()`
+- [LLM Privacy Layer](./llm-privacy-layer.md) - finding personal data in what Sunrise sends to external LLM providers and replacing it with placeholders; the adapter seam apps extend it through
 - [Anonymous Visitor ID](./visitor-id.md) - privacy posture of the `sunrise_vid` observability cookie (classification, retention, erasure)
 
 ## Architecture
@@ -153,24 +154,23 @@ When disabled, the provider assumes all consent is granted and the banner never 
 
 ### Customize Categories
 
-Edit `lib/consent/config.ts` to modify category descriptions:
+Change a category's name or description in the catalogue:
 
 ```typescript
-export const COOKIE_CATEGORIES: CookieCategory[] = [
-  {
-    id: 'essential',
-    name: 'Essential',
-    description: 'Your custom description...',
-    required: true,
+// lib/app/messages.ts, inside initAppMessages()
+overridePlatformMessages('en', {
+  cookies: {
+    categories: {
+      essential: { description: 'Your custom description...' },
+      optional: { name: 'Analytics', description: 'Your custom description...' },
+    },
   },
-  {
-    id: 'optional',
-    name: 'Analytics & Marketing',
-    description: 'Your custom description...',
-    required: false,
-  },
-];
+});
 ```
+
+`COOKIE_CATEGORIES` in `lib/consent/config.ts` holds only each category's `id`
+and whether it is `required`; the words are in the catalogue under
+`cookies.categories.<id>` (see `.context/ui/i18n.md`).
 
 ### Banner Delay
 

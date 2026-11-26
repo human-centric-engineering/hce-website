@@ -14,10 +14,12 @@ export const metadata: Metadata = {
     template: `%s - ${BRAND.name}`,
     default: BRAND.name,
   },
-  // Reaches here from lib/app/brand.ts (appBrandDescription) — committed code,
-  // so it is delivered by every build. This line matches upstream verbatim; the
-  // 0.10.0 literal it replaces existed only because NEXT_PUBLIC_APP_DESCRIPTION
-  // reached no container build (#661, fixed in 0.11.0).
+  // Was the starter blurb, hardcoded — which every fork shipped as the meta
+  // description across its whole marketing surface. The root layout's
+  // `BRAND.description` does NOT reach here: Next resolves metadata at the
+  // nearest segment that defines a field, so a group declaring `description`
+  // overrides the root outright. That is why #519's root-only fix was not
+  // enough on its own.
   description: BRAND.description,
 };
 
@@ -29,6 +31,9 @@ export const metadata: Metadata = {
  *
  * Phase 3.5: Landing Page & Marketing
  * Phase 4.4: Added maintenance mode support
+ *
+ * app:chrome — hce-website's SiteFooter carries no language switch: the site
+ * ships one language, so upstream's visitor switch (§138 t-1073) is left out.
  */
 export default function PublicLayout({
   children,

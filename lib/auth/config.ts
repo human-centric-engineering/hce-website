@@ -10,6 +10,8 @@ import { env } from '@/lib/env';
 import { sendEmail } from '@/lib/email/send';
 import { validateEmailConfig } from '@/lib/email/client';
 import { resolveEmailTemplate } from '@/lib/email/registry';
+import { emailLocaleForUser } from '@/lib/email/locale';
+import { emailTranslator, type EmailLocale } from '@/lib/email/translate';
 import { logger } from '@/lib/logging';
 import { dispatchUserCreated, type RedeemedInvitation } from '@/lib/auth/user-created-hooks';
 import { linkWaitlistEntryToAccount } from '@/lib/waitlist/link';
@@ -27,6 +29,10 @@ import {
   type SignupRecord,
 } from '@/lib/tenancy/membership';
 import { ORG_ROLES } from '@/lib/tenancy/roles';
+import { asksSignupOrg, signupOrgMemberships } from '@/lib/tenancy/signup-org';
+import { completeSignupOrg, completeFoundedSignupOrgs } from '@/lib/tenancy/lifecycle';
+import { keepRunningAfterResponse } from '@/lib/api/after-response';
+import { requiresEmailVerification } from '@/lib/auth/verification-status';
 import { isMultiTenant } from '@/lib/tenancy/context';
 import {
   getPendingSignup,
@@ -37,8 +43,8 @@ import {
 } from '@/lib/auth/pending-signup';
 import {
   validateInvitationToken,
-  deleteInvitationToken,
-  getValidInvitation,
+  findInvitationByToken,
+  consumeInvitation,
 } from '@/lib/utils/invitation-token';
 import { DEFAULT_USER_PREFERENCES } from '@/lib/validations/user';
 import {
@@ -166,7 +172,8 @@ function redeemedInvitation(metadata: InvitationMetadata): RedeemedInvitation {
 async function recordPendingMembership(
   user: UserCreateData,
   invitation: InvitationMetadata | null,
-  viaInvitation: boolean
+  viaInvitation: boolean,
+  signupMethod: 'email' | 'oauth'
 ): Promise<SignupRecord> {
   // Three steps, each with its own failure: the fallback below is for a
   // decision that failed, and must not narrow a role when only recording did.
@@ -183,7 +190,15 @@ async function recordPendingMembership(
 
   let memberships;
   try {
-    memberships = await membershipsForNewUser(user, invitation);
+    // A self-serve signup at `multi` is asked where it lands (§134 t-1062):
+    // by default an org of their own. `null` is the decision below, as before.
+    const selfServe = asksSignupOrg(user, invitation, viaInvitation)
+      ? await signupOrgMemberships(user, {
+          signupMethod,
+          waitlistEntryId: invitation?.waitlistEntryId ?? null,
+        })
+      : null;
+    memberships = selfServe ?? (await membershipsForNewUser(user, invitation));
   } catch (error) {
     logger.error('Failed to decide the org membership for a new user', error, {
       email: user.email,
@@ -277,6 +292,12 @@ export async function userCreateBeforeHook(
   }
 
   const isOAuthSignup = ctx?.path?.includes('/callback/') ?? false;
+  // What a signup-org resolver is told. Wider than `isOAuthSignup`, which
+  // reads the OAuth invitation state only a callback carries: better-auth
+  // also creates an OAuth account from `POST /sign-in/social` with an
+  // `idToken` (see the invite_only gate below).
+  const signupMethod =
+    isOAuthSignup || (ctx?.path?.includes('/sign-in/social') ?? false) ? 'oauth' : 'email';
 
   // Set when a valid invitation token authorises this OAuth signup; read by the
   // invite_only gate below.
@@ -308,18 +329,27 @@ export async function userCreateBeforeHook(
         const isValidToken = await validateInvitationToken(invitationEmail, invitationToken);
 
         if (isValidToken) {
-          // Record the authorisation itself, not just its side effects. A valid
-          // token with no parseable invitation record falls through to the
-          // bootstrap below, and the invite_only gate must still treat that
-          // account as invited.
-          oauthInvitationAccepted = true;
-
-          const invitation = await getValidInvitation(invitationEmail);
+          // This token's own row: the address may hold invitations into
+          // several orgs (#1199), so neither the newest row nor all of them.
+          const found = await findInvitationByToken(invitationEmail, invitationToken);
 
           // Delete token NOW to prevent race: token must be consumed before user
           // creation, so a concurrent OAuth signup cannot reuse the same single-use token.
-          await deleteInvitationToken(invitationEmail);
-          logger.info('OAuth invitation token consumed', { email: invitationEmail });
+          // Only the call that deleted the row is authorised by it: a signup
+          // that lost the race is not invited, and the invite_only gate below
+          // treats it as such.
+          const consumed = found ? await consumeInvitation(found.id) : false;
+
+          // Record the authorisation itself, not just its side effects. A
+          // consumed token with no parseable invitation record falls through
+          // to the bootstrap below, and the invite_only gate must still treat
+          // that account as invited.
+          oauthInvitationAccepted = consumed;
+          const invitation = consumed && found?.metadata ? { metadata: found.metadata } : null;
+          logger.info('OAuth invitation token consumed', {
+            email: invitationEmail,
+            consumed,
+          });
 
           // When a valid invitation record exists, honour its explicit role
           // (defaulting to USER) and return immediately. This is an invited
@@ -337,7 +367,12 @@ export async function userCreateBeforeHook(
             // The row this hook consumed is the only copy of the org the
             // invitation named; hand it to the hooks that follow now.
             const invited = { ...user, role: invitedRole };
-            const record = await recordPendingMembership(invited, invitation.metadata, true);
+            const record = await recordPendingMembership(
+              invited,
+              invitation.metadata,
+              true,
+              'oauth'
+            );
             return { data: { ...invited, ...record } };
           }
         }
@@ -436,7 +471,8 @@ export async function userCreateBeforeHook(
         const record = await recordPendingMembership(
           promoted,
           accepted ? { ...accepted, role: PLATFORM_ADMIN_ROLE } : null,
-          oauthInvitationAccepted || isInvitedSignup()
+          oauthInvitationAccepted || isInvitedSignup(),
+          signupMethod
         );
         return { data: { ...promoted, ...record } };
       }
@@ -466,7 +502,8 @@ export async function userCreateBeforeHook(
   const record = await recordPendingMembership(
     user,
     invitedSignupInvitation(),
-    oauthInvitationAccepted || isInvitedSignup()
+    oauthInvitationAccepted || isInvitedSignup(),
+    signupMethod
   );
   return { data: { ...user, ...record } };
 }
@@ -552,7 +589,19 @@ export async function userCreateAfterHook(
     // membership at all — so a floor skipped beside a written primary would
     // never be repaired.
     try {
-      await writeNewUserMemberships(user.id, memberships);
+      const { founded } = await writeNewUserMemberships(user.id, memberships);
+      // An org of their own, made by the before hook (§134 t-1062): its app
+      // setup and platform agents waited for its founder, who is now in it
+      // and can act there (an unverified address keeps it waiting, for the
+      // verification hook). After the response: an app's hooks may take
+      // seconds, and the signup must not wait on them.
+      if (founded) {
+        keepRunningAfterResponse(
+          () => completeSignupOrg(founded, user.id),
+          'Setting up a new signup org',
+          { orgId: founded, userId: user.id }
+        );
+      }
     } catch (membershipError) {
       logger.error('Failed to create org membership for new user', membershipError, {
         userId: user.id,
@@ -626,7 +675,7 @@ export async function userCreateAfterHook(
   }
 
   // Determine if welcome email should be sent immediately
-  const requiresVerification = env.REQUIRE_EMAIL_VERIFICATION ?? env.NODE_ENV === 'production';
+  const requiresVerification = requiresEmailVerification();
 
   const shouldSendWelcomeNow = isOAuthSignup || !requiresVerification || viaInvitation;
 
@@ -638,15 +687,7 @@ export async function userCreateAfterHook(
       isInvitation: viaInvitation,
     });
 
-    await sendEmail({
-      to: user.email,
-      subject: `Welcome to ${BRAND.name}`,
-      react: resolveEmailTemplate('welcome', {
-        userName: user.name || 'User',
-        userEmail: user.email,
-        baseUrl: env.BETTER_AUTH_URL,
-      }),
-    }).catch((error) => {
+    await sendWelcomeEmail(user).catch((error) => {
       logger.warn('Failed to send welcome email', {
         userId: user.id,
         userEmail: user.email,
@@ -689,6 +730,37 @@ export async function userCreateAfterHook(
   });
 }
 
+/** What an email calls a user who gave no name, in their language. */
+function fallbackName(where: EmailLocale): string {
+  return emailTranslator(where, 'emails.common')('fallbackName');
+}
+
+/**
+ * The welcome email, in the new user's language (§138 t-1075): their own
+ * choice, else their org's default, else English. Sent at signup or after
+ * verification; the caller decides which, and handles a failure.
+ */
+async function sendWelcomeEmail(user: {
+  id: string;
+  email: string;
+  name: string | null;
+}): Promise<void> {
+  const where = await emailLocaleForUser(user.id);
+  await sendEmail({
+    to: user.email,
+    subject: emailTranslator(where, 'emails.welcome')('subject', { brand: BRAND.name }),
+    react: resolveEmailTemplate(
+      'welcome',
+      {
+        userName: user.name || fallbackName(where),
+        userEmail: user.email,
+        baseUrl: env.BETTER_AUTH_URL,
+      },
+      where
+    ),
+  });
+}
+
 /**
  * Send password reset email for users with a password account.
  *
@@ -721,14 +793,19 @@ export async function sendResetPasswordHook(params: {
     return;
   }
 
+  const where = await emailLocaleForUser(user.id);
   await sendEmail({
     to: user.email,
-    subject: 'Reset your password',
-    react: resolveEmailTemplate('resetPassword', {
-      userName: user.name || 'User',
-      resetUrl: url,
-      expiresAt: new Date(Date.now() + 1 * 60 * 60 * 1000),
-    }),
+    subject: emailTranslator(where, 'emails.resetPassword')('subject'),
+    react: resolveEmailTemplate(
+      'resetPassword',
+      {
+        userName: user.name || fallbackName(where),
+        resetUrl: url,
+        expiresAt: new Date(Date.now() + 1 * 60 * 60 * 1000),
+      },
+      where
+    ),
   });
 }
 
@@ -811,11 +888,22 @@ export async function afterEmailVerificationHook(
     return;
   }
 
+  // A signup org whose setup waited for this address to be proven (§134
+  // t-1062). After the response, so the verification click does not wait on
+  // an app's hooks; never throws.
+  if (isMultiTenant()) {
+    keepRunningAfterResponse(
+      () => completeFoundedSignupOrgs(user.id),
+      'Setting up a verified founder’s signup org',
+      { userId: user.id }
+    );
+  }
+
   // Only send welcome email here if verification was required at signup.
   // When verification is not required, the welcome email is sent immediately
   // on account creation (databaseHooks.user.create.after). If the user later
   // verifies voluntarily from their profile/settings, we must not send it again.
-  const requiresVerification = env.REQUIRE_EMAIL_VERIFICATION ?? env.NODE_ENV === 'production';
+  const requiresVerification = requiresEmailVerification();
 
   if (!requiresVerification) {
     logger.info('Skipping welcome email after verification (already sent at signup)', {
@@ -825,15 +913,7 @@ export async function afterEmailVerificationHook(
   }
 
   // Send welcome email AFTER verification completes
-  await sendEmail({
-    to: user.email,
-    subject: `Welcome to ${BRAND.name}`,
-    react: resolveEmailTemplate('welcome', {
-      userName: user.name || 'User',
-      userEmail: user.email,
-      baseUrl: env.BETTER_AUTH_URL,
-    }),
-  }).catch((error) => {
+  await sendWelcomeEmail(user).catch((error) => {
     logger.warn('Failed to send welcome email after verification', {
       userId: user.id,
       error: error instanceof Error ? error.message : String(error),
@@ -903,14 +983,19 @@ export async function sendVerificationEmailHook({
   // Only the default: a caller's own callback is left alone, not prefixed.
   const verificationUrl = url.replace(/callbackURL=%2F(?=&|$)/, `callbackURL=${callbackPath}`);
 
+  const where = await emailLocaleForUser(user.id);
   await sendEmail({
     to: user.email,
-    subject: 'Verify your email address',
-    react: resolveEmailTemplate('verifyEmail', {
-      userName: user.name || 'User',
-      verificationUrl,
-      expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
-    }),
+    subject: emailTranslator(where, 'emails.verifyEmail')('subject'),
+    react: resolveEmailTemplate(
+      'verifyEmail',
+      {
+        userName: user.name || fallbackName(where),
+        verificationUrl,
+        expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
+      },
+      where
+    ),
   });
 }
 
@@ -943,16 +1028,21 @@ export async function sendChangeEmailConfirmationHook(params: {
     userId: user.id,
   });
 
+  const where = await emailLocaleForUser(user.id);
   await sendEmail({
     to: user.email, // The CURRENT address — never `newEmail`.
-    subject: 'Approve the email change on your account',
-    react: resolveEmailTemplate('changeEmailApproval', {
-      userName: user.name || 'User',
-      currentEmail: user.email,
-      newEmail,
-      approvalUrl: url,
-      expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
-    }),
+    subject: emailTranslator(where, 'emails.changeEmailApproval')('subject'),
+    react: resolveEmailTemplate(
+      'changeEmailApproval',
+      {
+        userName: user.name || fallbackName(where),
+        currentEmail: user.email,
+        newEmail,
+        approvalUrl: url,
+        expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TOKEN_TTL_MS),
+      },
+      where
+    ),
   });
 }
 
@@ -1054,10 +1144,38 @@ export async function sessionCreateBeforeHook(
   try {
     const pending = await getPendingSignup();
     if (pending) {
+      // A session minted at signup (OAuth) proves the founder can act, though
+      // the after hook, which writes the membership, runs after this hook and
+      // may have found no session row yet. After the response, by when it has.
+      if (isMultiTenant()) {
+        keepRunningAfterResponse(
+          () => completeFoundedSignupOrgs(session.userId, { signingIn: true }),
+          'Setting up a signing-in founder’s signup org',
+          { userId: session.userId }
+        );
+      }
       return { data: { activeOrgId: pending.membership.orgId } };
     }
 
-    const { orgId, healed } = await activeOrgForSession(session.userId);
+    const { orgId, healed, founded } = await activeOrgForSession(session.userId);
+    // A signup org whose setup waited for its founder (§134 t-1062): one the
+    // heal just gave them, and any they own still marked, which a session
+    // proves they can now act in (an accepted invitation, an OAuth address the
+    // provider did not verify). After the response, as on the signup itself.
+    if (founded) {
+      keepRunningAfterResponse(
+        () => completeSignupOrg(founded, session.userId),
+        'Setting up a healed signup org',
+        { orgId: founded, userId: session.userId }
+      );
+    }
+    if (isMultiTenant()) {
+      keepRunningAfterResponse(
+        () => completeFoundedSignupOrgs(session.userId, { signingIn: true }),
+        'Setting up a signing-in founder’s signup org',
+        { userId: session.userId }
+      );
+    }
     if (orgId === null) {
       logger.error(
         'User has no org membership at sign-in and no signup record to heal from; refused at multi until added to an org',
@@ -1121,14 +1239,14 @@ export const auth = betterAuth({
     // Email verification: enabled by default in production, disabled in development
     // Override with REQUIRE_EMAIL_VERIFICATION environment variable
     // Note: Verification email sending is configured in emailVerification block below
-    requireEmailVerification: env.REQUIRE_EMAIL_VERIFICATION ?? env.NODE_ENV === 'production',
+    requireEmailVerification: requiresEmailVerification(),
     sendResetPassword: sendResetPasswordHook,
   },
 
   // Email verification configuration
   emailVerification: {
     // Trigger verification email on signup when required
-    sendOnSignUp: env.REQUIRE_EMAIL_VERIFICATION ?? env.NODE_ENV === 'production',
+    sendOnSignUp: requiresEmailVerification(),
 
     // Automatically sign in user after successful email verification
     autoSignInAfterVerification: true,

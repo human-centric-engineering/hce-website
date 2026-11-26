@@ -1,23 +1,36 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
+import { getTranslations } from 'next-intl/server';
 import { getServerSession } from '@/lib/auth/utils';
 import { AdminSidebar } from '@/components/admin/admin-sidebar';
 import { AdminHeader } from '@/components/admin/admin-header';
+import { BreadcrumbProvider } from '@/components/admin/breadcrumb-context';
 import { InFlightExecutionBanner } from '@/components/admin/orchestration/in-flight-execution-banner';
+import { ConfigHealthGlobalBanner } from '@/components/admin/config-health-global-banner';
 import { BRAND } from '@/lib/brand';
 import { AUTH_LANDING_ROUTE } from '@/lib/auth-landing/route';
 import {
   requestActingOrg,
   requestAdminReach,
+  requestLockedSwitches,
+  requestMemberPlatformAdmin,
   requestSupportSession,
 } from '@/lib/auth/admin-page-viewer';
 import { SupportBanner } from '@/components/admin/support-banner';
+import { MemberPlatformAdminBanner } from '@/components/layouts/member-platform-admin-banner';
 import { isWaitlistEnabled } from '@/lib/waitlist/config';
 import { isMultiTenant } from '@/lib/tenancy/context';
 import { logger } from '@/lib/logging';
-import { ADMIN_PATHNAME_HEADER, adminPageTierOf, reachesAdminPage } from '@/lib/auth/admin-tier';
 import {
+  ADMIN_PATHNAME_HEADER,
+  adminPageRequirementOf,
+  adminPageTierOf,
+  lockedAdminPageOf,
+  reachesAdminPage,
+} from '@/lib/auth/admin-tier';
+import {
+  adminPageRequirements,
   namedTierAdminPages,
   orgScopedAdminPages,
   orgTierAdminPages,
@@ -26,13 +39,16 @@ import { AdminTierGate } from '@/components/admin/admin-tier-gate';
 import { getSharedSettingsAccess } from '@/lib/tenancy/shared-settings-access';
 import { SharedSettingsAccessProvider } from '@/components/admin/shared-settings-access';
 
-export const metadata: Metadata = {
-  title: {
-    template: `%s - Admin - ${BRAND.name}`,
-    default: `Admin - ${BRAND.name}`,
-  },
-  description: `Admin dashboard for ${BRAND.name}`,
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslations('admin.shell');
+  return {
+    title: {
+      template: `%s - ${t('admin')} - ${BRAND.name}`,
+      default: t('metaTitle', { brand: BRAND.name }),
+    },
+    description: t('metaDescription', { brand: BRAND.name }),
+  };
+}
 
 /**
  * Admin Layout (Phase 4.4)
@@ -81,7 +97,12 @@ export default async function AdminLayout({
   // routes for every admitted caller. One difference is deliberate: where a
   // guard refuses a session whose org entry is refused, this asks with no org
   // facts, so a platform admin still reaches the console to switch org — see
-  // `lib/auth/session-principal.ts`.
+  // `lib/auth/session-principal.ts`. A page registered with `requires`
+  // (§135 t-1034) opens only where the reach records the policy admitting
+  // the viewer to that tier with that switch as `scope.requires`. One whose
+  // switch the app shows locked (`whenLacking: 'lock'`, t-1053), and which the
+  // viewer's org lacks, is not redirected: `AdminTierGate` renders why it is
+  // closed in its place, never the page.
   //
   // This runs on a full load only — Next.js does not re-render a layout on
   // in-app navigation — so `AdminTierGate` below re-checks each navigation
@@ -92,8 +113,15 @@ export default async function AdminLayout({
   const pathname = requestHeaders.get(ADMIN_PATHNAME_HEADER);
   const orgTierPages = orgTierAdminPages();
   const namedTierPages = namedTierAdminPages();
+  const pageRequirements = adminPageRequirements();
   const reach = await requestAdminReach();
-  if (!reachesAdminPage(reach, pathname, adminPageTierOf(pathname, orgTierPages, namedTierPages))) {
+  const lockedSwitches = await requestLockedSwitches();
+  const pageTier = adminPageTierOf(pathname, orgTierPages, namedTierPages);
+  const pageRequires = adminPageRequirementOf(pathname, orgTierPages, pageRequirements);
+  if (
+    !reachesAdminPage(reach, pathname, pageTier, pageRequires) &&
+    !lockedAdminPageOf(reach, pathname, pageTier, pageRequires, lockedSwitches)
+  ) {
     redirect(AUTH_LANDING_ROUTE);
   }
 
@@ -119,48 +147,67 @@ export default async function AdminLayout({
         return null;
       })
     : Promise.resolve(null);
-  const [sharedSettings, actingOrg, supportSession] = await Promise.all([
+  // A platform admin acting in a customer org as a member there (t-1032) is
+  // presented as that role alone, so the platform pages are closed to them
+  // here; the banner says so and offers the switch back.
+  const memberAdminRead = multiTenant
+    ? requestMemberPlatformAdmin().catch((error: unknown) => {
+        logger.error('admin layout: could not read the member platform admin view', error);
+        return null;
+      })
+    : Promise.resolve(null);
+  const [sharedSettings, actingOrg, supportSession, memberAdmin] = await Promise.all([
     sharedSettingsRead,
     actingOrgRead,
     supportRead,
+    memberAdminRead,
   ]);
 
   return (
-    <div className="bg-background flex h-screen overflow-hidden">
-      <AdminSidebar
-        reach={reach}
-        multiTenant={multiTenant}
-        orgTierPages={orgTierPages}
-        namedTierPages={namedTierPages}
-        waitlistEnabled={isWaitlistEnabled()}
-      />
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {supportSession && <SupportBanner view={supportSession} />}
-        {/* Every page of one org's rows, closed sections included: a platform
-            admin there is still looking at the entered org's. */}
-        <AdminHeader orgName={actingOrg?.name} orgTierPages={orgScopedAdminPages()} />
-        <InFlightExecutionBanner />
-        {/* Scroll padding: a field brought into view by focus clears the
-            sticky Save bars forms pin to the top or bottom of this area. */}
-        <main className="flex-1 scroll-py-32 overflow-y-auto overscroll-contain">
-          <div className="p-6">
-            <SharedSettingsAccessProvider
-              readOnly={sharedSettings.readOnly}
-              canSwitch={sharedSettings.canSwitch}
-              installOrgMember={sharedSettings.installOrgMember}
-              isInstallOrg={sharedSettings.isInstallOrg}
-            >
-              <AdminTierGate
-                reach={reach}
-                orgTierPages={orgTierPages}
-                namedTierPages={namedTierPages}
+    <BreadcrumbProvider>
+      <div className="bg-background flex h-screen overflow-hidden">
+        <AdminSidebar
+          reach={reach}
+          multiTenant={multiTenant}
+          orgTierPages={orgTierPages}
+          namedTierPages={namedTierPages}
+          pageRequirements={pageRequirements}
+          lockedSwitches={lockedSwitches}
+          waitlistEnabled={isWaitlistEnabled()}
+        />
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {supportSession && <SupportBanner view={supportSession} />}
+          {memberAdmin && <MemberPlatformAdminBanner view={memberAdmin} />}
+          {/* Every page of one org's rows, closed sections included: a platform
+              admin there is still looking at the entered org's. */}
+          <AdminHeader orgName={actingOrg?.name} orgTierPages={orgScopedAdminPages()} />
+          {/* Config health reads a platform-only route, so an org admin is not shown it. */}
+          {reach === 'platform' && <ConfigHealthGlobalBanner />}
+          <InFlightExecutionBanner />
+          {/* Scroll padding: a field brought into view by focus clears the
+              sticky Save bars forms pin to the top or bottom of this area. */}
+          <main className="flex-1 scroll-py-32 overflow-y-auto overscroll-contain">
+            <div className="p-6">
+              <SharedSettingsAccessProvider
+                readOnly={sharedSettings.readOnly}
+                canSwitch={sharedSettings.canSwitch}
+                installOrgMember={sharedSettings.installOrgMember}
+                isInstallOrg={sharedSettings.isInstallOrg}
               >
-                {children}
-              </AdminTierGate>
-            </SharedSettingsAccessProvider>
-          </div>
-        </main>
+                <AdminTierGate
+                  reach={reach}
+                  orgTierPages={orgTierPages}
+                  namedTierPages={namedTierPages}
+                  pageRequirements={pageRequirements}
+                  lockedSwitches={lockedSwitches}
+                >
+                  {children}
+                </AdminTierGate>
+              </SharedSettingsAccessProvider>
+            </div>
+          </main>
+        </div>
       </div>
-    </div>
+    </BreadcrumbProvider>
   );
 }

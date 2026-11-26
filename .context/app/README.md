@@ -14,7 +14,7 @@ merge.
 - **Independent repo, shared history.** hce-website is its own repository
   (`human-centric-engineering/hce-website`) that shares Sunrise's full git history.
   It was forked at Sunrise **v0.7.0** (`b86d9d35`) and is currently synced to
-  Sunrise **v0.18.0** (`68df9103`).
+  Sunrise **v0.21.0** (`d8d07628`).
 - **Remotes.** `origin` = hce-website, `upstream` = Sunrise. hce-website keeps its
   own tag namespace; Sunrise's tags are not pushed to `origin`.
 - **Two tiers: Sunrise → app.** hce-website lives entirely in the reserved
@@ -84,9 +84,9 @@ npm run db:migrate:status  # then db:migrate:dev to apply newly-merged Sunrise m
 
 Read [`platform-divergences.md`](./platform-divergences.md) before resolving any
 conflict, and retire the rows the release made unnecessary. Then record the new
-version in the two places hce-website states it: the
-"currently synced to" line under [The fork model](#the-fork-model) above, and the
-`CLAUDE.md` banner. `lib/sunrise-version.ts` arrives through the merge; never
+version in the three places hce-website states it: the
+"currently synced to" line under [The fork model](#the-fork-model) above, the
+`CLAUDE.md` banner, and the fork banner in the root `README.md`. `lib/sunrise-version.ts` arrives through the merge; never
 edit it by hand.
 
 ### Brand identity
@@ -112,13 +112,15 @@ fork does _not_ use keep guarding. Add a tier here before putting files in it.
 
 ### Platform files hce-website keeps its own version of
 
-Two Sunrise-owned files carry a local edit, each marked in-file with an `app:`
-comment saying what to do on merge:
+The full list, with the merge action for each, is
+[`platform-divergences.md`](./platform-divergences.md); read it, not this
+section, when resolving a sync. The two files below carry a local edit, each
+marked in-file with an `app:` comment saying what to do on merge:
 
-| File                      | Marker       | Why                                                                                                                                  |
-| ------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `app/(public)/page.tsx`   | `app:shim`   | Re-exports `components/app/marketing/home-page`. Same for `contact/`, `privacy/`, `terms/`.                                          |
-| `app/(public)/layout.tsx` | `app:chrome` | Bespoke holding-page chrome instead of `AppHeader`/`PublicFooter`; the swapped-in components live under `components/app/marketing/`. |
+| File                      | Marker       | Why                                                                                                                                                                                                                             |
+| ------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app/(public)/page.tsx`   | `app:shim`   | Re-exports `components/app/marketing/home-page`. Same for `contact/`, `privacy/`, `terms/`.                                                                                                                                     |
+| `app/(public)/layout.tsx` | `app:chrome` | Bespoke holding-page chrome instead of `AppHeader`/`PublicFooter` (components under `components/app/marketing/`), without upstream's visitor language switch; its test `tests/unit/app/(public)/layout.test.tsx` stays deleted. |
 
 Plus two **pinned rows** in `tests/unit/lib/app/defaults.test.ts` (`app:pin`),
 which asserts every `lib/app/*` seam ships empty. Filling a seam is expected to

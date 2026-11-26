@@ -6,7 +6,13 @@
  * without string-matching on error messages.
  */
 
-import { PROVIDER_NOT_PERMITTED, SPEND_CAP_CODES } from '@/lib/orchestration/llm/provider';
+import {
+  PRIVACY_BLOCKED,
+  PRIVACY_CONFIDENTIAL,
+  PRIVACY_REFUSED,
+  PROVIDER_NOT_PERMITTED,
+  SPEND_CAP_CODES,
+} from '@/lib/orchestration/llm/provider';
 
 /**
  * Thrown by the `human_approval` executor. The engine catches this
@@ -83,6 +89,14 @@ function isPolicyRefusal(cause: unknown): boolean {
 
 const SPEND_CAP_REFUSALS: readonly string[] = Object.values(SPEND_CAP_CODES);
 
+/** Refusals whose own code a step keeps: the spend caps, and the LLM privacy layer's (§127, §130). */
+const KEPT_CODE_REFUSALS: readonly string[] = [
+  ...SPEND_CAP_REFUSALS,
+  PRIVACY_REFUSED,
+  PRIVACY_BLOCKED,
+  PRIVACY_CONFIDENTIAL,
+];
+
 /**
  * The first of `codes` carried by `cause` or anything it wraps, by duck type
  * on `code`; bounded at ten levels, as {@link isPolicyRefusal} explains.
@@ -118,6 +132,16 @@ export class ExecutorError extends Error {
    */
   public readonly tokensUsed: number;
   public readonly costUsd: number;
+  /**
+   * Set by a step that ends its branch as a failed run whether its own work
+   * succeeds or fails — a `send_notification` with `terminalStatus: 'failed'`
+   * whose send failed (t-1078). The step's own failure reason, which the
+   * engine still fails the run with when the step's `skip` strategy (or
+   * `fallback` with no `fallbackStepId`) swallows this error. A fallback step
+   * takes the branch over instead. Unset, a skipped step lets the run carry on
+   * as before.
+   */
+  public readonly failWorkflow?: string;
 
   constructor(
     stepId: string,
@@ -126,7 +150,8 @@ export class ExecutorError extends Error {
     cause?: unknown,
     retriable = true,
     tokensUsed = 0,
-    costUsd = 0
+    costUsd = 0,
+    failWorkflow?: string
   ) {
     super(message);
     this.name = 'ExecutorError';
@@ -145,14 +170,16 @@ export class ExecutorError extends Error {
     //
     // A monthly spend cap's refusal (§110 t-788) is decided the same way, for
     // the same reason: the cap is still reached on the next attempt. Its code
-    // is kept, so a trace says which cap stopped the step.
+    // is kept, so a trace says which cap stopped the step. So is the LLM
+    // privacy layer's refusal (§127): the same policy refuses on every attempt.
     const refusalCode = isPolicyRefusal(cause)
       ? PROVIDER_NOT_PERMITTED
-      : refusalCodeIn(cause, SPEND_CAP_REFUSALS);
+      : refusalCodeIn(cause, KEPT_CODE_REFUSALS);
     this.code = refusalCode !== null && code !== EXECUTOR_THREW ? refusalCode : code;
     this.cause = cause;
     this.retriable = refusalCode !== null ? false : retriable;
     this.tokensUsed = tokensUsed;
     this.costUsd = costUsd;
+    if (failWorkflow !== undefined) this.failWorkflow = failWorkflow;
   }
 }

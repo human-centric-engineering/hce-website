@@ -171,7 +171,12 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
       stalePending: 0,
       abandonedApprovals: 0,
     });
-    vi.mocked(backfillMissingEmbeddings).mockResolvedValue({ processed: 5, failed: 0 });
+    vi.mocked(backfillMissingEmbeddings).mockResolvedValue({
+      processed: 5,
+      failed: 0,
+      skipped: 0,
+      filledBatch: false,
+    });
     vi.mocked(enforceRetentionPolicies).mockResolvedValue(RETENTION_RESULT);
     vi.mocked(enforceSystemRetentionPolicies).mockResolvedValue({
       auditLogsDeleted: 0,
@@ -246,6 +251,8 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
       'platformAgents',
       'pendingErasures',
       'waitlistRetention',
+      'orgCreatedHooks',
+      'abandonedSignupOrgs',
     ]);
     expect(body.data.durationMs).toEqual(expect.any(Number));
   });
@@ -278,7 +285,7 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
         hookRetries: 2,
         orphanSweep: { recovered: 0, exhausted: 0, errors: [] },
         zombieReaper: { reaped: 1, stalePending: 0, abandonedApprovals: 0 },
-        embeddingBackfill: { processed: 5, failed: 0 },
+        embeddingBackfill: { processed: 5, failed: 0, skipped: 0, filledBatch: false },
         retention: RETENTION_RESULT,
         totalDurationMs: expect.any(Number),
       })

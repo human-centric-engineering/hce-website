@@ -6,6 +6,12 @@ import {
   type OrgProviderOption,
   type OrgProviderPolicyView,
 } from '@/components/admin/orgs/org-providers-form';
+import {
+  OrgEntitlementsForm,
+  type OrgEntitlementsView,
+} from '@/components/admin/orgs/org-entitlements-form';
+import { OrgMetersForm, type OrgMetersView } from '@/components/admin/orgs/org-meters-form';
+import { OrgPrivacyForm, type OrgPrivacyView } from '@/components/admin/orgs/org-privacy-form';
 import { OrgUsageSummary } from '@/components/admin/orgs/org-usage-summary';
 import { Badge } from '@/components/ui/badge';
 import { API } from '@/lib/api/endpoints';
@@ -16,7 +22,7 @@ import { parsePaginationMeta } from '@/lib/validations/common';
 
 export const metadata: Metadata = {
   title: 'Organisation',
-  description: 'One organisation, and the providers it may use.',
+  description: 'One organisation, the providers it may use, and how its AI calls are protected.',
 };
 
 interface OrgDetail {
@@ -92,21 +98,36 @@ async function getAllProviders(): Promise<OrgProviderOption[] | null> {
  * Admin — one organisation (§120 t-745).
  *
  * Server shell: the org (`GET /api/v1/admin/orgs/[id]`), its provider policy
- * (`GET …/providers`), the provider list and its usage this month against
- * its cap (`GET /api/v1/admin/orchestration/costs/orgs?orgId=`), in parallel. Only the approved
- * providers are editable here; rename, suspend and members stay API-only. A
+ * (`GET …/providers`), its LLM privacy settings (`GET …/privacy`, §127
+ * t-1010), the provider list and its usage this month against its cap
+ * (`GET /api/v1/admin/orchestration/costs/orgs?orgId=`) and its entitlement
+ * switches (`GET …/entitlements`, §135 t-1033) and its meters against their
+ * limits (`GET …/meters`, §135 t-1035), in parallel. Seats is always a meter,
+ * so the limits section always shows. The switches
+ * section shows only when the API reports at least one registered switch, or
+ * that the app's registration failed, so vanilla Sunrise shows nothing new; a
+ * failed load says so, since the page cannot tell whether there were any. The approved providers, the privacy
+ * settings, the switches and the limits are editable here; rename, suspend and members
+ * stay API-only. A
  * missing org is a 404, and any other failure to load it goes to the error
  * boundary. A policy or provider fetch that fails says so in place of the
  * form, rather than offering a partial set to save over the real one.
  */
 export default async function OrgPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const [org, policy, providers, usage] = await Promise.all([
+  const [org, policy, privacy, providers, usage, entitlements, meters] = await Promise.all([
     getOrg(id),
     loadOrNull<OrgProviderPolicyView>(API.ADMIN.orgProviders(id)),
+    loadOrNull<OrgPrivacyView>(API.ADMIN.orgPrivacy(id)),
     getAllProviders(),
     getOrgUsage(id),
+    loadOrNull<OrgEntitlementsView>(API.ADMIN.orgEntitlements(id)),
+    loadOrNull<OrgMetersView>(API.ADMIN.orgMeters(id)),
   ]);
+  // No app switch registered: nothing to show, as on vanilla Sunrise. A
+  // registration that failed is shown, since every org has lost its switches.
+  const showSwitches =
+    entitlements === null || entitlements.switches.length > 0 || entitlements.registrationFailed;
 
   return (
     <div className="space-y-6">
@@ -149,6 +170,30 @@ export default async function OrgPage({ params }: { params: Promise<{ id: string
         )}
       </section>
 
+      {showSwitches && (
+        <section className="space-y-3 rounded-md border p-4">
+          <h2 className="text-lg font-medium">Entitlements</h2>
+          {entitlements ? (
+            <OrgEntitlementsForm orgId={org.id} entitlements={entitlements} />
+          ) : (
+            <p className="text-destructive text-sm">
+              The switches could not be loaded. Reload the page to try again.
+            </p>
+          )}
+        </section>
+      )}
+
+      <section className="space-y-3 rounded-md border p-4">
+        <h2 className="text-lg font-medium">Limits</h2>
+        {meters ? (
+          <OrgMetersForm orgId={org.id} meters={meters} />
+        ) : (
+          <p className="text-destructive text-sm">
+            The limits could not be loaded. Reload the page to try again.
+          </p>
+        )}
+      </section>
+
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-lg font-medium">Approved providers</h2>
         {policy && providers ? (
@@ -156,6 +201,17 @@ export default async function OrgPage({ params }: { params: Promise<{ id: string
         ) : (
           <p className="text-destructive text-sm">
             The approved providers could not be loaded. Reload the page to try again.
+          </p>
+        )}
+      </section>
+
+      <section className="space-y-3 rounded-md border p-4">
+        <h2 className="text-lg font-medium">LLM privacy</h2>
+        {privacy ? (
+          <OrgPrivacyForm orgId={org.id} orgName={org.name} privacy={privacy} />
+        ) : (
+          <p className="text-destructive text-sm">
+            The privacy settings could not be loaded. Reload the page to try again.
           </p>
         )}
       </section>
