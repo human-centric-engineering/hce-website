@@ -3,9 +3,10 @@
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useTranslations } from 'next-intl';
 import { authClient } from '@/lib/auth/client';
-import { signInSchema, type SignInInput } from '@/lib/validations/auth';
+import { createSignInSchema, type SignInInput } from '@/lib/validations/auth';
 import { useAnalytics, EVENTS } from '@/lib/analytics';
 import { isRecord } from '@/lib/utils';
 import { safeCallbackUrl } from '@/lib/security';
@@ -39,31 +40,15 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const callbackUrl = safeCallbackUrl(searchParams.get('callbackUrl'), AUTH_LANDING_ROUTE);
   const { track, identify } = useAnalytics();
+  const t = useTranslations('auth');
+  const tv = useTranslations('validation');
+  const signInSchema = useMemo(() => createSignInSchema(tv), [tv]);
 
   const [isLoading, setIsLoading] = useState(false);
-  const save = useSaveFailure({ fallback: 'An unexpected error occurred. Please try again.' });
-  const [attemptedEmail, setAttemptedEmail] = useState<string | null>(null);
-  const [notVerified, setNotVerified] = useState(false);
-  const [isSendingVerification, setIsSendingVerification] = useState(false);
-  const [verificationSent, setVerificationSent] = useState(false);
-  const verification = useSaveFailure({
-    fallback: 'Failed to send verification email. Please try again.',
-  });
-
-  // An OAuth sign-in that failed comes back in the URL: it is shown where a
-  // failed sign-in is, until the form's own sign-in fails instead.
-  const oauthError = searchParams.get('error');
-  const oauthErrorDescription = searchParams.get('error_description');
-  const oauthMessage = oauthError
-    ? oauthErrorDescription || 'OAuth authentication failed. Please try again.'
-    : null;
-  // From better-auth's code, not its wording: a fork may reword the message.
-  const unverified = notVerified && !!attemptedEmail && !!save.failure;
-
   const {
     register,
     handleSubmit,
-    formState: { errors },
+    formState: { errors, isSubmitted },
   } = useForm<SignInInput>({
     resolver: zodResolver(signInSchema),
     mode: 'onTouched',
@@ -72,6 +57,28 @@ export function LoginForm() {
       password: '',
     },
   });
+
+  const save = useSaveFailure({
+    fallback: t('shared.unexpectedError'),
+    errors,
+  });
+  const [attemptedEmail, setAttemptedEmail] = useState<string | null>(null);
+  const [notVerified, setNotVerified] = useState(false);
+  const [isSendingVerification, setIsSendingVerification] = useState(false);
+  const [verificationSent, setVerificationSent] = useState(false);
+  const verification = useSaveFailure({
+    fallback: t('shared.sendVerificationFailed'),
+  });
+
+  // An OAuth sign-in that failed comes back in the URL: it is shown where a
+  // failed sign-in is, until the form's own Save is pressed
+  // (`isSubmitted`), even if that press was blocked: a blocked save's summary
+  // clears itself as fields are fixed (t-1013).
+  const oauthError = searchParams.get('error');
+  const oauthErrorDescription = searchParams.get('error_description');
+  const oauthMessage = oauthError ? oauthErrorDescription || t('shared.oauthFailed') : null;
+  // From better-auth's code, not its wording: a fork may reword the message.
+  const unverified = notVerified && !!attemptedEmail && !!save.failure;
 
   // Handle sending verification email directly from login form
   const handleSendVerification = async () => {
@@ -92,7 +99,7 @@ export function LoginForm() {
         verification.show(
           isRecord(raw) && typeof raw.message === 'string'
             ? raw.message
-            : 'Failed to send verification email'
+            : t('login.form.sendVerificationFailed')
         );
         return;
       }
@@ -137,12 +144,10 @@ export function LoginForm() {
           },
           onError: (ctx) => {
             if (ctx.response?.status === 429) {
-              save.show(
-                'Too many sign-in attempts. Please wait a few minutes before trying again.'
-              );
+              save.show(t('login.form.tooManyAttempts'));
             } else {
               setNotVerified(ctx.error.code === 'EMAIL_NOT_VERIFIED');
-              save.show(ctx.error.message || 'Invalid email or password');
+              save.show(ctx.error.message || t('login.form.invalidCredentials'));
             }
             setIsLoading(false);
           },
@@ -171,7 +176,7 @@ export function LoginForm() {
       >
         {/* Email Field */}
         <div className="space-y-2">
-          <Label htmlFor="email">Email</Label>
+          <Label htmlFor="email">{t('fields.email')}</Label>
           <Input
             id="email"
             type="email"
@@ -185,7 +190,7 @@ export function LoginForm() {
 
         {/* Password Field */}
         <div className="space-y-2">
-          <Label htmlFor="password">Password</Label>
+          <Label htmlFor="password">{t('fields.password')}</Label>
           <PasswordInput
             id="password"
             placeholder="••••••••"
@@ -198,14 +203,14 @@ export function LoginForm() {
 
         {/* A failed sign-in, beside Sign In */}
         <SaveError failure={save.failure} />
-        {!save.failure && oauthMessage && <FormError message={oauthMessage} />}
+        {!isSubmitted && !save.failure && oauthMessage && <FormError message={oauthMessage} />}
         {/* Show send verification email button for unverified email errors */}
         {unverified && (
           <div className="space-y-3">
             {verificationSent ? (
               <div className="flex items-center gap-2 rounded-md bg-green-50 p-3 text-sm text-green-800 dark:bg-green-900/20 dark:text-green-400">
                 <CheckCircle2 className="h-4 w-4 shrink-0" />
-                <span>Verification email sent! Check your inbox.</span>
+                <span>{t('login.form.verificationSent')}</span>
               </div>
             ) : (
               <>
@@ -219,10 +224,10 @@ export function LoginForm() {
                   {isSendingVerification ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Sending...
+                      {t('shared.sending')}
                     </>
                   ) : (
-                    'Send verification email'
+                    t('shared.sendVerificationEmail')
                   )}
                 </Button>
                 <SaveError failure={verification.failure} />
@@ -233,7 +238,7 @@ export function LoginForm() {
 
         {/* Submit Button */}
         <Button type="submit" className="w-full" disabled={isLoading}>
-          {isLoading ? 'Signing in...' : 'Sign In'}
+          {isLoading ? t('login.form.signingIn') : t('login.form.submit')}
         </Button>
       </form>
     </div>

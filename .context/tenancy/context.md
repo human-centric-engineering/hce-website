@@ -77,8 +77,31 @@ interface TenantContext {
     | 'job'
     | 'implicit';
   role?: OrgRole | null; // the caller's role in orgId, when the entering code looked it up
+  support?: SupportEntry; // the grant a 'support' entry was admitted under (§121)
 }
 ```
+
+**One store per process, not per module graph (#1138).** Next evaluates a
+module once per module graph: the route handlers in one, `instrumentation.ts`
+in another. A `globalThis` singleton built at boot, such as the capability
+dispatcher, runs the instrumentation graph's code, so a module-level store
+would leave it reading an empty copy while the route that called it is inside
+an org, and at `multi` its queries throw "No tenant context". So the store
+lives on `globalThis` (`sunriseTenantContext`), and so do the two others such
+a singleton reads: the subject context (`sunriseSubjectContext`,
+`lib/auth/subject-context.ts`) and the paid-call hold (`sunrisePaidCallHold`,
+`lib/orchestration/llm/spend-caps.ts`). They are shared together on purpose.
+With only the tenant store shared, the dispatcher's reads would run in the
+right org, but the subject store would answer `none`, which is not narrowed by
+owner. A loud failure would become a quiet, over-wide read. Sharing the handle
+shares no contents: a scope still covers only its own call stack.
+`txScope` (`lib/db/tenancy-extension.ts`) and `invitedSignupContext`
+(`lib/auth/signup-mode.ts`) stay per graph, because each is written and read
+in one graph. Their docblocks and the
+[`process-state.ts`](../../lib/tenancy/process-state.ts) rows say why.
+[`context-shared-store.test.ts`](../../tests/unit/lib/tenancy/context-shared-store.test.ts)
+loads each shared module twice and fails if any of them goes back to module
+level.
 
 - **`getTenantContext()`** — the scope, or `null` when none was entered.
 - **`requireTenantContext()`** — the scope; at `multi` **throws** when none
@@ -86,6 +109,10 @@ interface TenantContext {
   before a query runs wide is the only safe answer); at `single` answers the
   install org marked `implicit`, the eighth source, so a log line can tell it
   from a real entry.
+- **`orgIdForCall()`** — the org a provider call is charged to or governed
+  by, for a per-org control on it (the spend caps, the LLM privacy floor):
+  the entered org, or at `single` the install org; `null` at `multi` with no
+  org, which the eligibility gate has already refused. It never throws.
 - **`requireOrgId()`** — the entered org, for a lookup that has to name it: a
   per-org unique key (`orgId_slug` on an agent, a knowledge base or a
   document, t-708) cannot be asked without saying whose `support` is meant.
@@ -127,6 +154,22 @@ interface TenantContext {
   numbers, and `tests/unit/lib/tenancy/cross-org-count-sites.test.ts`
   (always-run) fails naming any other. Nothing makes the scope itself
   read-only; that module's queries do, which is why it is confined there.
+- **`runAsLivenessProbe(fn)`** (#1262) — the same null-org system scope, for
+  the database liveness probe's `SELECT 1` in `getDatabaseHealth()`, which the
+  unauthenticated `/api/health` route calls with no org to enter, and in
+  `checkDatabaseConnection()` (t-1055). Logged at `debug` for
+  `runAsCredentialLookup`'s reason: monitors poll it every few seconds. It
+  reads no rows, is called from one file, `lib/db/utils.ts`, and
+  `tests/unit/lib/tenancy/liveness-probe-sites.test.ts` (always-run) fails
+  naming any other.
+- **`runAsFounderRelease(userId, fn)`** (t-1084) — the same null-org system
+  scope, for `releaseFoundedSignupOrgs()`'s one statement, which releases the
+  signup orgs one founder can now act in. It runs on an auth hook's stack,
+  which entered no org, on every sign-in at `multi`, so it is logged at
+  `debug` for `runAsCredentialLookup`'s reason. It is called from one file,
+  `lib/tenancy/lifecycle.ts` (`completeFoundedSignupOrgs()`), and
+  `tests/unit/lib/tenancy/founder-release-sites.test.ts` (always-run) fails
+  naming any other.
 - **`runDetached(fn)`** (§108 t-715) — runs `fn` outside every scope, for
   arming something whose lifetime is the **process's** from inside a request.
   Synchronous and unawaited, unlike the runners above: a caller arms a timer

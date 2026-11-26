@@ -209,7 +209,7 @@ const DEFAULT_SCHEDULE_RESULT = {
 const DEFAULT_RETRY_RESULT = 3;
 const DEFAULT_HOOK_RETRY_RESULT = 2;
 const DEFAULT_REAPER_RESULT = { reaped: 1, stalePending: 0, abandonedApprovals: 0 };
-const DEFAULT_EMBEDDER_RESULT = { backfilled: 5, failed: 0 };
+const DEFAULT_EMBEDDER_RESULT = { processed: 5, failed: 0, skipped: 0, filledBatch: false };
 const DEFAULT_RETENTION_RESULT = {
   deleted: 10,
   agentsProcessed: 2,
@@ -248,7 +248,7 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
     vi.mocked(processPendingRetries).mockResolvedValue(DEFAULT_RETRY_RESULT);
     vi.mocked(processPendingHookRetries).mockResolvedValue(DEFAULT_HOOK_RETRY_RESULT);
     vi.mocked(reapZombieExecutions).mockResolvedValue(DEFAULT_REAPER_RESULT);
-    vi.mocked(backfillMissingEmbeddings).mockResolvedValue(DEFAULT_EMBEDDER_RESULT as never);
+    vi.mocked(backfillMissingEmbeddings).mockResolvedValue(DEFAULT_EMBEDDER_RESULT);
     vi.mocked(enforceRetentionPolicies).mockResolvedValue(DEFAULT_RETENTION_RESULT);
     vi.mocked(enforceSystemRetentionPolicies).mockResolvedValue({
       auditLogsDeleted: 0,
@@ -292,7 +292,12 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
       stalePending: 0,
       abandonedApprovals: 0,
     });
-    vi.mocked(backfillMissingEmbeddings).mockResolvedValue({ processed: 0, failed: 0 });
+    vi.mocked(backfillMissingEmbeddings).mockResolvedValue({
+      processed: 0,
+      failed: 0,
+      skipped: 0,
+      filledBatch: false,
+    });
     vi.mocked(enforceRetentionPolicies).mockResolvedValue({
       ...DEFAULT_RETENTION_RESULT,
       deleted: 0,
@@ -564,6 +569,8 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
       'platformAgents',
       'pendingErasures',
       'waitlistRetention',
+      'orgCreatedHooks',
+      'abandonedSignupOrgs',
     ]);
     expect(typeof body.data.durationMs).toBe('number');
     expect(body.data.durationMs).toBeGreaterThanOrEqual(0);
@@ -585,6 +592,8 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
     expect(body.data).not.toHaveProperty('platformAgents');
     expect(body.data).not.toHaveProperty('pendingErasures');
     expect(body.data).not.toHaveProperty('waitlistRetention');
+    expect(body.data).not.toHaveProperty('orgCreatedHooks');
+    expect(body.data).not.toHaveProperty('abandonedSignupOrgs');
   });
 
   it('still invokes all seven maintenance tasks (six in background)', async () => {
@@ -684,10 +693,11 @@ describe('POST /api/v1/admin/orchestration/maintenance/tick', () => {
     expect(response.status).toBe(202);
     expect(body.data.schedules).toEqual({ error: 'schedules DB down' });
     // Background tasks still kick off even when schedules fail
-    // (12 tasks: evaluationRuns added in Phase 1, auditLogRetention split out in
+    // (13 tasks: evaluationRuns added in Phase 1, auditLogRetention split out in
     // §108, platformAgents added in §116, pendingErasures in t-842,
-    // waitlistRetention in §125 t-976/t-977).
-    expect(body.data.backgroundTasks).toHaveLength(12);
+    // waitlistRetention in §125 t-976/t-977, orgCreatedHooks in §134 t-1061,
+    // abandonedSignupOrgs in §134 t-1062).
+    expect(body.data.backgroundTasks).toHaveLength(14);
   });
 
   it('returns a readable schedules.error when processDueSchedules rejects a non-Error', async () => {

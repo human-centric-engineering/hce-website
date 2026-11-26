@@ -14,6 +14,13 @@ import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/logging';
 import { computeDefaultModelMap } from '@/lib/orchestration/llm/model-registry';
 import {
+  DEFAULT_PRIVACY_IGNORED_ENTITY_TYPES,
+  parseIgnoredEntityTypes,
+  parseConfidentialPolicy,
+  parseEmbeddingsPolicy,
+  parsePrivacyMode,
+} from '@/lib/orchestration/privacy/settings-policy';
+import {
   searchConfigSchema,
   storedDefaultModelsSchema,
   escalationConfigSchema,
@@ -21,6 +28,7 @@ import {
 import {
   TASK_TYPES,
   type ApprovalDefaultAction,
+  type ConfidentialModelBinding,
   type EscalationConfig,
   type InputGuardMode,
   type OutputGuardMode,
@@ -71,6 +79,17 @@ export function parseEscalationConfig(
 }
 
 /**
+ * The model for confidential messages from its two columns (§130 t-1038):
+ * both halves or none, since half a binding names no model.
+ */
+export function confidentialModelBinding(
+  providerSlug: string | null | undefined,
+  model: string | null | undefined
+): ConfidentialModelBinding | null {
+  return providerSlug && model ? { providerSlug, model } : null;
+}
+
+/**
  * Hydrate a raw Prisma row into the `OrchestrationSettings` response shape,
  * filling in any task keys the stored JSON is missing from the registry defaults.
  */
@@ -111,6 +130,15 @@ export function hydrateSettings(row: {
   stuckExecutionThresholdMins?: number | null;
   defaultMaxCostPerExecutionUsd?: number | null;
   defaultMaxCostPerTurnUsd?: number | null;
+  privacyMode?: string | null;
+  privacyIgnoredEntityTypes?: Prisma.JsonValue | null;
+  privacyProtectLocalProviders?: boolean | null;
+  privacyEmbeddingsPolicy?: string | null;
+  privacyConfidentialPersonal?: string | null;
+  privacyConfidentialCommercial?: string | null;
+  confidentialModelProvider?: string | null;
+  confidentialModel?: string | null;
+  orgProviderKeysEnabled?: boolean | null;
   createdAt: Date;
   updatedAt: Date;
 }): OrchestrationSettings {
@@ -189,6 +217,30 @@ export function hydrateSettings(row: {
     stuckExecutionThresholdMins: clampStuckThreshold(row.stuckExecutionThresholdMins),
     defaultMaxCostPerExecutionUsd: row.defaultMaxCostPerExecutionUsd ?? null,
     defaultMaxCostPerTurnUsd: row.defaultMaxCostPerTurnUsd ?? null,
+    // Absent only on a row shape from before the migration (a test fixture,
+    // a hand-built row): read as the upgrade default, `off`. A stored value
+    // that is not a mode reads as `null`, which the privacy stage refuses on.
+    privacyMode: row.privacyMode === undefined ? 'off' : parsePrivacyMode(row.privacyMode),
+    privacyIgnoredEntityTypes:
+      row.privacyIgnoredEntityTypes === undefined
+        ? [...DEFAULT_PRIVACY_IGNORED_ENTITY_TYPES]
+        : parseIgnoredEntityTypes(row.privacyIgnoredEntityTypes),
+    privacyProtectLocalProviders: row.privacyProtectLocalProviders === true,
+    privacyEmbeddingsPolicy: parseEmbeddingsPolicy(row.privacyEmbeddingsPolicy ?? undefined),
+    // As the embeddings policy: absent reads as the upgrade default (`allow`),
+    // a stored value that is not a policy as the strictest (`block`).
+    privacyConfidentialPersonal: parseConfidentialPolicy(
+      row.privacyConfidentialPersonal ?? undefined
+    ),
+    privacyConfidentialCommercial: parseConfidentialPolicy(
+      row.privacyConfidentialCommercial ?? undefined
+    ),
+    confidentialModel: confidentialModelBinding(
+      row.confidentialModelProvider,
+      row.confidentialModel
+    ),
+    // Absent on a row shape from before the column: off, its default.
+    orgProviderKeysEnabled: row.orgProviderKeysEnabled === true,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -356,6 +408,10 @@ async function createDefaultSettingsRow() {
       inputGuardMode: 'log_only',
       outputGuardMode: 'log_only',
       citationGuardMode: 'log_only',
+      // The privacy settings are left to their column defaults on purpose:
+      // a row created now is a new install, and the column default (`detect`)
+      // is what a new install starts in. Rows that existed before the column
+      // were filled with `off` by its migration (§127, spec § Settings).
     },
     update: {},
   });

@@ -120,6 +120,13 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       'an edit that removes a crossing changes no import this test follows.',
   },
   {
+    path: 'tests/unit/lib/privacy/erase-org.test.ts',
+    reason:
+      'parses `prisma/schema/orchestration-ops.prisma` to prove `AiAdminAuditLog.actingOrgId` ' +
+      'carries no relation, so erasing an org keeps its audit rows naming it (t-1005). ' +
+      'A schema-only edit adding that FK reaches this test through no import.',
+  },
+  {
     path: 'tests/unit/lib/privacy/export-sources.test.ts',
     reason:
       'parses `prisma/schema/*.prisma` and fails until every model with a ' +
@@ -168,6 +175,15 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       'reaches this test, and an undeclared holder is a cross-org cache at multi.',
   },
   {
+    path: 'tests/unit/lib/privacy/pii/registry-only.test.ts',
+    reason:
+      'scans lib/, app/, components/ and scripts/ for any module other than ' +
+      'core-defaults.ts importing a core privacy detector, and any call to a ' +
+      "detector's detect method outside the runner. A direct caller would skip the timeout, " +
+      'validation and an app’s replacement, and it lives in a module whose ' +
+      'import graph never reaches this test.',
+  },
+  {
     path: 'tests/unit/lib/tenancy/roles.test.ts',
     reason:
       'holds `ORG_ROLES` / `ORG_STATUSES` equal to the generated Prisma ' +
@@ -199,6 +215,22 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       'TypeScript scanner for code that names `runAsCrossOrgCount` (the debug-logged system ' +
       'bypass) or star-re-exports its module, and fails naming any but the global-config ' +
       'usage module. A new caller is a file no import chain connects to this test (§107 t-752).',
+  },
+  {
+    path: 'tests/unit/lib/tenancy/liveness-probe-sites.test.ts',
+    reason:
+      'scans every non-test source file in the checkout, root files included, with the ' +
+      'TypeScript scanner for code that names `runAsLivenessProbe` (the debug-logged system ' +
+      'bypass for the database health probe) or star-re-exports its module, and fails naming ' +
+      'any but `lib/db/utils.ts`. A new caller is a file no import chain connects to this test (#1262).',
+  },
+  {
+    path: 'tests/unit/lib/tenancy/founder-release-sites.test.ts',
+    reason:
+      'scans every non-test source file in the checkout, root files included, with the ' +
+      'TypeScript scanner for code that names `runAsFounderRelease` (the debug-logged system ' +
+      'bypass for releasing a founder’s signup orgs at sign-in) or star-re-exports its module, and ' +
+      'fails naming any but `lib/tenancy/lifecycle.ts`. A new caller is a file no import chain connects to this test (t-1084).',
   },
   {
     path: 'tests/unit/scripts/ci/shared-settings-writes.test.ts',
@@ -235,6 +267,30 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       'connects to this test.',
   },
   {
+    path: 'tests/unit/prisma/back-relation-zones.test.ts',
+    reason:
+      'parses every `prisma/schema` file off disk, at any depth, and fails when a back-relation on `Org` or ' +
+      "`User` sits outside its tier's zone, or a zone marker changed (#859). The change " +
+      'that breaks it is a schema edit, often `prisma format` appending a core line into ' +
+      'the app zone, and a `.prisma` file reaches no test through the module graph.',
+  },
+  {
+    path: 'tests/unit/scripts/ci/schema-files.test.ts',
+    reason:
+      'holds that every file in `CORE_SCHEMA_FILES` is on disk. A core `.prisma` file renamed ' +
+      'without updating the list reaches no test through the module graph, and every schema ' +
+      "guard would then treat its models as a fork's and drop them out of core's rules.",
+  },
+  {
+    path: 'tests/unit/prisma/user-relation-on-delete.test.ts',
+    reason:
+      'parses every `prisma/schema` file off disk, at any depth, and fails naming any ' +
+      'relation to `User` without `onDelete: Cascade`, or `SetNull` on an optional ' +
+      "relation. Prisma's default is Restrict, which makes erasing that user throw. The " +
+      'change that breaks it is a schema edit, and a `.prisma` file reaches no test ' +
+      'through the module graph.',
+  },
+  {
     path: 'tests/unit/prisma/auth-schema-parity.test.ts',
     reason:
       'reads `prisma/schema/auth.prisma` off disk and compares it against ' +
@@ -243,6 +299,14 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       '`package.json` — which reaches no test through the module graph. That ' +
       'is how 0.11.0 shipped a 1.7 upgrade without `Account.issuer` and broke ' +
       'every sign-in.',
+  },
+  {
+    path: 'tests/unit/lib/auth/better-auth-single-core.test.ts',
+    reason:
+      'reads `package.json` and `package-lock.json` and fails when `better-auth` and ' +
+      '`@better-auth/core` are not pinned equal, or when a second core is nested anywhere. ' +
+      'A second core gives the signup hooks a different request-state store, so an invited ' +
+      'user lands without their invitation (t-1081). A lockfile edit reaches no test through the module graph.',
   },
   {
     path: 'tests/unit/app/layout-metadata.test.ts',
@@ -271,6 +335,13 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
     reason:
       'reads `lib/app/*` off disk to check every seam still ships its ' +
       'documented empty default. A new seam file changes the answer.',
+  },
+  {
+    path: 'tests/unit/setup-seam-pins.test.ts',
+    reason:
+      'asserts `tests/setup.ts` still replaces each pinned `lib/app/*` init. ' +
+      'The edit that drops a pin is to the setup file, which no test imports, ' +
+      'and Sunrise cannot see the loss any other way: it fails only in a fork.',
   },
   {
     path: 'tests/unit/auth-role-literals.test.ts',
@@ -374,6 +445,14 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       '#654), and a fourth would be in a file no import chain connects here.',
   },
   {
+    path: 'tests/unit/lib/orchestration/llm/cost-log-own-key.test.ts',
+    reason:
+      'walks the tree for every `logCost` call site and compares what each ' +
+      'passes for `ownKey` against a written roster (§137 t-1046). A new call ' +
+      "site that forgets it counts an org's own vendor bill against the " +
+      "platform's caps, and would be in a file no import chain connects here.",
+  },
+  {
     path: 'tests/unit/lib/validations/trim-order.test.ts',
     reason:
       'parses every `z.string()` chain under app/, lib/ and components/ and ' +
@@ -403,6 +482,15 @@ export const ALWAYS_RUN_TESTS: readonly AlwaysRunEntry[] = [
       'lint into a workflow of its own — should delete this entry and keep its ' +
       'own version of the guard, rather than carry a red suite about a file it ' +
       'no longer shares.',
+  },
+  {
+    path: 'tests/unit/scripts/ci/validate-changed.test.ts',
+    reason:
+      'reads `package.json` as text to hold `validate:changed` equal to ' +
+      '`validate` with only the lint and Prettier steps swapped, and its cache ' +
+      'flags equal to `lint` and `format:check`. A step added to `validate` ' +
+      'alone is a `package.json`-only edit that no import chain connects to ' +
+      'this test, and it would leave `/pre-pr` silently skipping that step.',
   },
   {
     path: 'tests/unit/app/app-icons.test.ts',

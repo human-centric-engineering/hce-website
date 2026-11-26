@@ -80,6 +80,7 @@ import {
   WorkflowStatus,
   type ExecutionEvent,
   type ExecutionTraceEntry,
+  type PrivacySummary,
   type LlmTelemetryEntry,
   type StepResult,
   type TurnEntry,
@@ -135,6 +136,16 @@ import {
 import { buildApprovalUrls } from '@/lib/orchestration/approval-tokens';
 import { dispatchApprovalNotification } from '@/lib/orchestration/notifications/dispatcher';
 import { env } from '@/lib/env';
+import { userKnownValues } from '@/lib/orchestration/privacy/known-values';
+import {
+  childPrivacyScope,
+  createPrivacyScope,
+  currentPrivacyScope,
+  privacySummary,
+  runInPrivacyScope,
+  withPrivacyScope,
+  type PrivacyScope,
+} from '@/lib/orchestration/privacy/scope';
 import {
   SPAN_WORKFLOW_EXECUTE,
   SPAN_WORKFLOW_STEP,
@@ -271,6 +282,22 @@ export interface ExecuteWorkflowArg {
   versionId?: string;
 }
 
+/**
+ * A step's privacy scope: a child of the execution's, or a scope of its own
+ * when the step runs outside one (a test driving a step directly).
+ */
+function stepPrivacyScope(executionId: string, stepId: string): PrivacyScope {
+  const scopeId = `execution:${executionId}:step:${stepId}`;
+  const parent = currentPrivacyScope();
+  return parent ? childPrivacyScope(parent, scopeId) : createPrivacyScope({ scopeId });
+}
+
+/** The trace entry's `privacy` field: the step's counts, when the layer scanned a call. */
+function privacyField(scope: PrivacyScope | undefined): { privacy?: PrivacySummary } {
+  const summary = scope ? privacySummary(scope) : undefined;
+  return summary ? { privacy: summary } : {};
+}
+
 export class OrchestrationEngine {
   async *execute(
     workflow: ExecuteWorkflowArg,
@@ -285,8 +312,16 @@ export class OrchestrationEngine {
     // --------------------------------------------------------------
     // 1. Row creation / resume
     // --------------------------------------------------------------
-    const { executionId, trace, budgetLimitUsd, ctx, resumeAfterStepId, resumePosition, lease } =
-      await this.initRun(workflow, inputData, options, baseLogger);
+    const {
+      executionId,
+      trace,
+      budgetLimitUsd,
+      ctx,
+      resumeAfterStepId,
+      resumePosition,
+      resumeUntaken,
+      lease,
+    } = await this.initRun(workflow, inputData, options, baseLogger);
 
     yield workflowStarted(executionId, workflow.id);
     emitHookEvent('workflow.started', {
@@ -306,27 +341,43 @@ export class OrchestrationEngine {
       // and parallel) and any deeper helper-`withSpan` calls automatically
       // see workflow.execute as their parent in OTLP backends — one trace
       // per execution, end-to-end.
-      yield* withSpanGenerator(
-        SPAN_WORKFLOW_EXECUTE,
+      // `withPrivacyScope` gives every provider call the execution makes the
+      // execution's privacy scope (§127); each step runs in a child of it.
+      // A run started inside other work (an agent's `run_workflow` mid-turn,
+      // a sub-workflow) sits in that work's scope, so it counts there too.
+      const privacyScope = createPrivacyScope(
         {
-          [SUNRISE_EXECUTION_ID]: executionId,
-          [SUNRISE_WORKFLOW_ID]: workflow.id,
-          [SUNRISE_USER_ID]: options.userId ?? '',
+          scopeId: `execution:${executionId}`,
+          ...(options.userId ? { userId: options.userId } : {}),
+          ...(options.userId ? { loadKnownValues: userKnownValues(options.userId) } : {}),
         },
-        (workflowSpan) =>
-          this.executeInner(
-            workflowSpan,
-            workflow,
-            lease,
-            trace,
-            budgetLimitUsd,
-            ctx,
-            resumeAfterStepId,
-            baseLogger,
-            options,
-            resumePosition ?? null
-          ),
-        { manualStatus: true }
+        currentPrivacyScope()
+      );
+      yield* withPrivacyScope(
+        privacyScope,
+        withSpanGenerator(
+          SPAN_WORKFLOW_EXECUTE,
+          {
+            [SUNRISE_EXECUTION_ID]: executionId,
+            [SUNRISE_WORKFLOW_ID]: workflow.id,
+            [SUNRISE_USER_ID]: options.userId ?? '',
+          },
+          (workflowSpan) =>
+            this.executeInner(
+              workflowSpan,
+              workflow,
+              lease,
+              trace,
+              budgetLimitUsd,
+              ctx,
+              resumeAfterStepId,
+              baseLogger,
+              options,
+              resumePosition ?? null,
+              resumeUntaken ?? []
+            ),
+          { manualStatus: true }
+        )
       );
     } finally {
       stopHeartbeat();
@@ -351,7 +402,9 @@ export class OrchestrationEngine {
     resumeAfterStepId: string | undefined,
     baseLogger: Logger,
     options: ExecuteOptions,
-    resumePosition: WalkPosition | null = null
+    resumePosition: WalkPosition | null = null,
+    /** What an approval resume knows was untaken at the pause (t-1077). */
+    resumeUntaken: string[] = []
   ): AsyncGenerator<ExecutionEvent, void, unknown> {
     const { executionId } = lease;
     let workflowSpanError: unknown = undefined;
@@ -385,32 +438,85 @@ export class OrchestrationEngine {
       }
 
       // Build in-degree map for convergence detection. A step is "ready"
-      // only when ALL its predecessors have been visited.
+      // only when every predecessor has either run or will never run.
       // Bounded retry back-edges (maxRetries > 0 + condition) are excluded —
       // they don't represent data dependencies and would cause deadlocks
       // after cascade-clear removes the back-edge source from visited.
       const inDegree = new Map<string, Set<string>>();
       for (const step of workflow.definition.steps) {
-        for (const edge of step.nextSteps) {
-          if (edge.maxRetries && edge.maxRetries > 0 && edge.condition) continue;
-          if (!inDegree.has(edge.targetStepId)) {
-            inDegree.set(edge.targetStepId, new Set());
+        for (const target of forwardTargets(step)) {
+          if (!inDegree.has(target)) {
+            inDegree.set(target, new Set());
           }
-          inDegree.get(edge.targetStepId)!.add(step.id);
+          inDegree.get(target)!.add(step.id);
         }
+      }
+
+      // Steps this walk will not reach: every edge into them is from a step
+      // that ran and chose another way, or from a step that is itself
+      // unreached (t-1077). A join counts them as settled, so a step with
+      // edges from two guards (or from two branches of a route) runs when
+      // the edge actually taken arrives, rather than waiting forever on a
+      // branch that was never taken. A join after a parallel step still
+      // waits for every branch: each one was taken.
+      const untaken = new Set<string>();
+
+      // The steps that can send the walk to each step through
+      // `errorConfig.fallbackStepId`. That is not a forward edge, so it is not
+      // in `inDegree`, but a step is not untaken while one of these can still
+      // fall back to it.
+      const fallbackSources = new Map<string, Set<string>>();
+      for (const step of workflow.definition.steps) {
+        const parsed = stepErrorConfigSchema.safeParse(step.config);
+        const target = parsed.success ? parsed.data.fallbackStepId : undefined;
+        if (!target) continue;
+        if (!fallbackSources.has(target)) fallbackSources.set(target, new Set());
+        fallbackSources.get(target)!.add(step.id);
       }
 
       const isReady = (stepId: string): boolean => {
         const preds = inDegree.get(stepId);
         if (!preds || preds.size === 0) return true;
         for (const pred of preds) {
-          if (!visited.has(pred)) return false;
+          if (!visited.has(pred) && !untaken.has(pred)) return false;
         }
         return true;
       };
 
       // Steps waiting for predecessors to complete before they can run.
       const pending = new Set<string>();
+
+      // A step's forward successors and its fallback step: what it could
+      // send the walk to.
+      const reachableFrom = (id: string): string[] => {
+        const step = byId.get(id);
+        if (!step) return [];
+        const fallback = stepErrorConfigSchema.safeParse(step.config);
+        const fallbackId = fallback.success ? fallback.data.fallbackStepId : undefined;
+        return fallbackId ? [...forwardTargets(step), fallbackId] : forwardTargets(step);
+      };
+
+      // After `fromIds` ran and handed on, mark what they left behind: each
+      // step they could reach that nothing reached and that no predecessor
+      // (or step that falls back to it) can still reach, and in turn what it
+      // could reach. A step is reached once queued, pending or visited.
+      const settleUntaken = (fromIds: Iterable<string>): void => {
+        const stack: string[] = [];
+        for (const id of fromIds) stack.push(...reachableFrom(id));
+        while (stack.length > 0) {
+          const id = stack.pop()!;
+          if (untaken.has(id) || visited.has(id) || pending.has(id) || queue.includes(id)) {
+            continue;
+          }
+          if (!isReady(id)) continue;
+          const sources = fallbackSources.get(id);
+          if (sources && [...sources].some((src) => !visited.has(src) && !untaken.has(src))) {
+            continue;
+          }
+          untaken.add(id);
+          stack.push(...reachableFrom(id));
+        }
+      };
 
       let stepCount = 0;
       let finalOutput: unknown = null;
@@ -440,7 +546,7 @@ export class OrchestrationEngine {
           // The target was already visited — check if the originating edge
           // has a maxRetries cap that allows re-execution.
           const retryEdge = step.nextSteps.find(
-            (e) => e.targetStepId === id && e.maxRetries && e.maxRetries > 0 && e.condition
+            (e) => e.targetStepId === id && isBoundedRetryEdge(e)
           );
           if (!retryEdge) continue;
 
@@ -505,24 +611,49 @@ export class OrchestrationEngine {
           };
 
           // Cascade-clear visited for the retry target and all its
-          // downstream dependents so the engine re-executes them.
+          // downstream dependents so the engine re-executes them. What the
+          // earlier attempt left untaken downstream is open again too.
           const toClear = new Set<string>([id]);
           const clearQueue = [id];
           while (clearQueue.length > 0) {
             const current = clearQueue.shift()!;
             const currentStep = byId.get(current);
             if (!currentStep) continue;
-            for (const edge of currentStep.nextSteps) {
-              if (visited.has(edge.targetStepId) && !toClear.has(edge.targetStepId)) {
-                toClear.add(edge.targetStepId);
-                clearQueue.push(edge.targetStepId);
+            // Its fallback step too: what the earlier attempt left untaken
+            // through one is open again.
+            const fallback = stepErrorConfigSchema.safeParse(currentStep.config);
+            const targets = currentStep.nextSteps.map((edge) => edge.targetStepId);
+            if (fallback.success && fallback.data.fallbackStepId) {
+              targets.push(fallback.data.fallbackStepId);
+            }
+            for (const target of targets) {
+              if ((visited.has(target) || untaken.has(target)) && !toClear.has(target)) {
+                toClear.add(target);
+                clearQueue.push(target);
               }
             }
           }
+          // A visited step cleared only through untaken steps was reached by
+          // a step outside the clear, which will not run again to reach it:
+          // it waits again as pending, so it runs once its other inputs settle
+          // rather than being marked untaken.
+          const stillReached = [...toClear].filter((clearId) => {
+            if (clearId === id || !visited.has(clearId)) return false;
+            const preds = inDegree.get(clearId);
+            if (!preds) return false;
+            let reachedFromOutside = false;
+            for (const pred of preds) {
+              if (toClear.has(pred) && visited.has(pred)) return false;
+              if (!toClear.has(pred) && visited.has(pred)) reachedFromOutside = true;
+            }
+            return reachedFromOutside;
+          });
           for (const clearId of toClear) {
             visited.delete(clearId);
             pending.delete(clearId);
+            untaken.delete(clearId);
           }
+          for (const clearId of stillReached) pending.add(clearId);
 
           queue.push(id);
 
@@ -563,6 +694,7 @@ export class OrchestrationEngine {
           done: {},
           pending: [...pending],
           visited: [...visited],
+          untaken: [...untaken],
           retryCounts: Object.fromEntries(retryCount),
           stepCount,
           budgetWarned: ctx.variables.__budgetWarned === true,
@@ -578,11 +710,21 @@ export class OrchestrationEngine {
         }
       };
 
+      // An approval resume restores what the live walk had marked untaken
+      // when the paused step's iteration began (t-1077), so a join behind a
+      // branch not taken before the pause still runs. It is not rebuilt from
+      // the trace: the trace does not say which edges a step chose, so a step
+      // a paused batch's sibling chose but had not run would look untaken.
+      if (resumeAfterStepId && !resumePosition) {
+        for (const id of resumeUntaken) if (!visited.has(id)) untaken.add(id);
+      }
+
       if (resumePosition) {
         // Restore the saved walk, re-queue the in-flight steps that had not
         // finished, and replay what runs after the ones that had.
         for (const id of resumePosition.visited) visited.add(id);
         for (const id of resumePosition.pending) pending.add(id);
+        for (const id of resumePosition.untaken ?? []) untaken.add(id);
         for (const [key, count] of Object.entries(resumePosition.retryCounts)) {
           retryCount.set(key, count);
         }
@@ -617,6 +759,10 @@ export class OrchestrationEngine {
             for (const nextId of next) if (!visited.has(nextId)) queue.push(nextId);
           }
         }
+        // Once every finished step has handed on, as the live walk would.
+        // Settled from every step that has run, not just the in-flight ones,
+        // so a position saved before `untaken` existed is rebuilt too.
+        settleUntaken([...visited]);
 
         // A step ended the run before the host died: finalise it the way the
         // live run was about to, rather than re-running the step (and paying
@@ -746,6 +892,7 @@ export class OrchestrationEngine {
           if (singleResult.terminal) break;
 
           yield* advanceAfterStep(step, singleResult.nextIds, singleResult.output);
+          settleUntaken([stepId]);
           continue;
         }
 
@@ -832,6 +979,7 @@ export class OrchestrationEngine {
         for (const id of batchResult.nextIds) {
           if (!visited.has(id)) queue.push(id);
         }
+        settleUntaken(ready);
       }
 
       // --------------------------------------------------------------
@@ -1076,7 +1224,8 @@ export class OrchestrationEngine {
               lastError.cause,
               false,
               accumulatedTokens,
-              accumulatedCost
+              accumulatedCost,
+              lastError.failWorkflow
             );
           }
           if (attempt < lastAttempt) {
@@ -1105,7 +1254,8 @@ export class OrchestrationEngine {
             lastError.cause,
             lastError.retriable,
             accumulatedTokens,
-            accumulatedCost
+            accumulatedCost,
+            lastError.failWorkflow
           )
         : new ExecutorError(step.id, 'retry_exhausted', 'Retry exhausted');
     }
@@ -1130,6 +1280,11 @@ export class OrchestrationEngine {
       const partialTokens = execErr.tokensUsed;
       const partialCost = execErr.costUsd;
 
+      // A step that ends its branch as a failed run still does when its own
+      // work failed and was skipped (t-1078): the trace keeps the error, the
+      // run ends with the step's reason.
+      const failWorkflow = failReasonAfterError(step, execErr, ctx);
+
       if (strategy === 'skip') {
         // Sanitised once so the SSE event and the trace entry's `error`
         // field carry the same text. Without skipError on the result, the
@@ -1143,6 +1298,7 @@ export class OrchestrationEngine {
           skipped: true,
           skipError: skipReason,
           ...(errorConfig.expectedSkip ? { expectedSkip: true } : {}),
+          ...(failWorkflow ? { failWorkflow } : {}),
         };
       }
 
@@ -1156,7 +1312,14 @@ export class OrchestrationEngine {
             nextStepIds: [errorConfig.fallbackStepId],
           };
         }
-        return { output: null, tokensUsed: partialTokens, costUsd: partialCost };
+        // With no fallback step, fallback behaves as skip, and so does a
+        // step that ends the run failed.
+        return {
+          output: null,
+          tokensUsed: partialTokens,
+          costUsd: partialCost,
+          ...(failWorkflow ? { failWorkflow } : {}),
+        };
       }
 
       // strategy === 'fail' — propagate.
@@ -1347,14 +1510,21 @@ export class OrchestrationEngine {
       await this.recordStepTurn(lease, step.id, [], baseLogger, { attempt, attemptId });
     };
 
+    // The step's own privacy scope (§127): every provider call the step makes,
+    // a capability's included, is tallied here and in the execution's scope,
+    // and the step's trace entry records the step's counts.
+    const stepScope = stepPrivacyScope(executionId, step.id);
     try {
-      stepResult = yield* this.runStepWithStrategy(
-        step,
-        ctx,
-        telemetryOut,
-        onAttemptStart,
-        startAttempt,
-        startAttemptId
+      stepResult = yield* withPrivacyScope(
+        stepScope,
+        this.runStepWithStrategy(
+          step,
+          ctx,
+          telemetryOut,
+          onAttemptStart,
+          startAttempt,
+          startAttemptId
+        )
       );
     } catch (err) {
       if (err instanceof PausedForApproval) {
@@ -1379,6 +1549,7 @@ export class OrchestrationEngine {
           durationMs,
           input: step.config,
           ...rollupTelemetry(telemetryOut),
+          ...privacyField(stepScope),
           ...(stepTurns.length > 0 ? { turns: traceTurns(stepTurns) } : {}),
         });
         // The pause path does not call `clearRunningStep`, so the row
@@ -1470,6 +1641,7 @@ export class OrchestrationEngine {
         durationMs,
         input: step.config,
         ...rollupTelemetry(telemetryOut),
+        ...privacyField(stepScope),
         ...(stepTurns.length > 0 ? { turns: traceTurns(stepTurns) } : {}),
       });
       ctx.resumeTurns = undefined;
@@ -1512,6 +1684,7 @@ export class OrchestrationEngine {
       durationMs,
       input: step.config,
       ...rollupTelemetry(telemetryOut),
+      ...privacyField(stepScope),
       ...(stepTurns.length > 0 ? { turns: traceTurns(stepTurns) } : {}),
       ...(completedProvenance ? { provenance: completedProvenance } : {}),
     });
@@ -1655,6 +1828,9 @@ export class OrchestrationEngine {
     // (including retries) independently.
     // Note: allEvents.push() from concurrent callbacks is safe because
     // Node.js is single-threaded — each push() completes atomically between awaits.
+    // Each branch's own privacy scope (§127), so its trace entry records only
+    // its own calls.
+    const stepScopes = new Map<string, PrivacyScope>();
     const promises = steps.map(async (step) =>
       // `withSpan` activates the parallel-branch span as the OTEL active
       // context; AsyncLocalStorage forks per Promise (Node ≥ 18), so each
@@ -1677,7 +1853,11 @@ export class OrchestrationEngine {
           allEvents.push(stepStarted(step.id, step.type, step.name, step.description));
 
           try {
-            const result = await this.runStepToCompletion(step, ctx, telemetryOut);
+            const stepScope = stepPrivacyScope(executionId, step.id);
+            stepScopes.set(step.id, stepScope);
+            const result = await runInPrivacyScope(stepScope, () =>
+              this.runStepToCompletion(step, ctx, telemetryOut)
+            );
             // Capture endedAt *inside* the callback — once per branch, at the
             // real finish moment. The post-`Promise.allSettled` loop runs
             // sequentially long after the slowest branch ends, so writing
@@ -1783,6 +1963,7 @@ export class OrchestrationEngine {
           durationMs,
           input: step.config,
           ...rollupTelemetry(telemetryOut),
+          ...privacyField(stepScopes.get(step.id)),
         });
         const batchApprovalData =
           typeof outcome.value.payload === 'object' && outcome.value.payload !== null
@@ -1830,6 +2011,7 @@ export class OrchestrationEngine {
           durationMs,
           input: step.config,
           ...rollupTelemetry(telemetryOut),
+          ...privacyField(stepScopes.get(step.id)),
         });
         await this.checkpoint(lease, ctx, trace, { ended: { stepId: step.id, kind: 'failed' } });
         await this.clearRunningStep(executionId, step.id, baseLogger);
@@ -1867,6 +2049,7 @@ export class OrchestrationEngine {
         durationMs,
         input: step.config,
         ...rollupTelemetry(telemetryOut),
+        ...privacyField(stepScopes.get(step.id)),
         ...(parallelProvenance ? { provenance: parallelProvenance } : {}),
       });
       const nextIds = chosenNextIds(step, stepResult);
@@ -2042,7 +2225,8 @@ export class OrchestrationEngine {
               lastError.cause,
               false,
               accumulatedTokens,
-              accumulatedCost
+              accumulatedCost,
+              lastError.failWorkflow
             );
           }
           if (attempt < retryCount) {
@@ -2058,7 +2242,8 @@ export class OrchestrationEngine {
             lastError.cause,
             lastError.retriable,
             accumulatedTokens,
-            accumulatedCost
+            accumulatedCost,
+            lastError.failWorkflow
           )
         : new ExecutorError(step.id, 'retry_exhausted', 'Retry exhausted');
     }
@@ -2081,6 +2266,8 @@ export class OrchestrationEngine {
       const partialTokens = execErr.tokensUsed;
       const partialCost = execErr.costUsd;
 
+      const failWorkflow = failReasonAfterError(step, execErr, ctx);
+
       if (strategy === 'skip') {
         return {
           output: null,
@@ -2089,6 +2276,7 @@ export class OrchestrationEngine {
           skipped: true,
           skipError: sanitizeError(execErr),
           ...(errorConfig.expectedSkip ? { expectedSkip: true } : {}),
+          ...(failWorkflow ? { failWorkflow } : {}),
         };
       }
 
@@ -2101,7 +2289,12 @@ export class OrchestrationEngine {
             nextStepIds: [errorConfig.fallbackStepId],
           };
         }
-        return { output: null, tokensUsed: partialTokens, costUsd: partialCost };
+        return {
+          output: null,
+          tokensUsed: partialTokens,
+          costUsd: partialCost,
+          ...(failWorkflow ? { failWorkflow } : {}),
+        };
       }
 
       // strategy === 'fail'
@@ -2126,6 +2319,8 @@ export class OrchestrationEngine {
     resumeAfterStepId?: string;
     /** The walk position a crash-resume continues from (t-966). */
     resumePosition?: WalkPosition | null;
+    /** What an approval resume knows was untaken at the pause (t-1077). */
+    resumeUntaken?: string[];
     lease: LeaseHandle;
   }> {
     if (options.resumeFromExecutionId) {
@@ -2250,6 +2445,17 @@ export class OrchestrationEngine {
       // is cleared below: should this run crash before saving its own, the
       // orphan resume then takes the cursor path, which is right for them.
       const resumePosition = reason === 'orphan-resume' ? parseWalkPosition(row.walkState) : null;
+      // An approval pause leaves the position its step's iteration saved as it
+      // began, and approving it (which sets the row PENDING) keeps it. Its
+      // `untaken` is what the live walk had settled by then, so the resume can
+      // use it (t-1077); the rest of it is stale. Retry-from-step clears the
+      // failed run's position, so a position on a fresh resume is a pause's.
+      // Only one that is the paused step's own, never an earlier pause's.
+      const pausePosition = reason === 'fresh-resume' ? parseWalkPosition(row.walkState) : null;
+      const resumeUntaken =
+        pausePosition && row.currentStep && pausePosition.inFlight.includes(row.currentStep)
+          ? (pausePosition.untaken ?? [])
+          : [];
       // Continue an attempt — replay its turns, keep its number and id — only
       // for a step the saved position says was running alone and had not
       // finished. A row that outlived its step (its delete failed) is a
@@ -2301,6 +2507,7 @@ export class OrchestrationEngine {
         ctx,
         resumeAfterStepId: row.currentStep ?? undefined,
         resumePosition,
+        resumeUntaken,
         lease: { executionId: row.id, token: leaseToken },
       };
     }
@@ -3021,6 +3228,42 @@ function attachRetryToTrace(
     }
   }
   return undefined;
+}
+
+/**
+ * A bounded retry back-edge: it sends the walk back to a step already run, so
+ * it is not a dependency of its target.
+ */
+function isBoundedRetryEdge(edge: WorkflowStep['nextSteps'][number]): boolean {
+  return Boolean(edge.maxRetries && edge.maxRetries > 0 && edge.condition);
+}
+
+/** The steps a step's forward edges lead to: every edge but a bounded retry. */
+function forwardTargets(step: WorkflowStep): string[] {
+  return step.nextSteps.filter((edge) => !isBoundedRetryEdge(edge)).map((e) => e.targetStepId);
+}
+
+/**
+ * The reason a step whose own work failed still fails the run with, when its
+ * error strategy skips it (or falls back with no fallback step): a
+ * `send_notification` marked `terminalStatus: 'failed'` ends its branch as a
+ * failed run whether or not its send works (t-1078). The executor's own reason
+ * (from the notice body) when it gave one; otherwise the error itself, which
+ * covers a step timeout and anything thrown before the executor could add it.
+ * A cancelled run's abort is left alone, so the run still ends as cancelled.
+ */
+function failReasonAfterError(
+  step: WorkflowStep,
+  err: ExecutorError,
+  ctx: Readonly<ExecutionContext>
+): string | undefined {
+  if (ctx.signal?.aborted) return undefined;
+  if (err.failWorkflow) return err.failWorkflow;
+  const endsRunFailed =
+    step.type === 'send_notification' &&
+    isRecord(step.config) &&
+    step.config.terminalStatus === 'failed';
+  return endsRunFailed ? sanitizeError(err) : undefined;
 }
 
 /** The steps a finished step hands on to: the ones it chose, else every outgoing edge. */

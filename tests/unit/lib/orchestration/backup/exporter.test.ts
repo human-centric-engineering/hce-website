@@ -305,6 +305,35 @@ describe('exportOrchestrationConfig', () => {
     expect(payload.data.settings?.globalMonthlyBudgetUsd).toBeNull();
   });
 
+  it('exports model pins in defaultModels and in a step modelOverride verbatim (§136 t-1068)', async () => {
+    const defaultModels = { chat: 'microsoft::gpt-4o', routing: 'gpt-4o-mini' };
+    const snapshot = {
+      steps: [
+        {
+          id: 's1',
+          name: 'S1',
+          type: 'llm_call',
+          config: { prompt: 'hi', modelOverride: 'microsoft::gpt-4o' },
+          nextSteps: [],
+        },
+      ],
+      entryStepId: 's1',
+      errorStrategy: 'fail',
+    };
+    mockFindMany
+      .mockResolvedValueOnce([]) // agents
+      .mockResolvedValueOnce([]) // capabilities
+      .mockResolvedValueOnce([{ ...workflowRow, publishedVersion: { snapshot } }]) // workflows
+      .mockResolvedValueOnce([]); // webhooks
+    mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+    mockFindUnique.mockResolvedValue({ ...settingsRow, defaultModels });
+
+    const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+    expect(payload.data.settings?.defaultModels).toEqual(defaultModels);
+    expect(payload.data.workflows[0].workflowDefinition).toEqual(snapshot);
+  });
+
   it('reads and exports the failed-webhook retention window (#838)', async () => {
     mockFindMany
       .mockResolvedValueOnce([])
@@ -325,6 +354,64 @@ describe('exportOrchestrationConfig', () => {
     expect(payload.data.settings?.webhookDlqRetentionDays).toBe(120);
   });
 
+  it('reads and exports the LLM privacy settings (§127)', async () => {
+    mockFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+    mockFindUnique.mockResolvedValue({
+      ...settingsRow,
+      privacyMode: 'off',
+      privacyIgnoredEntityTypes: ['DATE'],
+      privacyProtectLocalProviders: true,
+      privacyEmbeddingsPolicy: 'local_only',
+    });
+
+    const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+    expect(mockFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          privacyMode: true,
+          privacyIgnoredEntityTypes: true,
+          privacyProtectLocalProviders: true,
+          privacyEmbeddingsPolicy: true,
+        }),
+      })
+    );
+    expect(payload.data.settings).toMatchObject({
+      privacyMode: 'off',
+      privacyIgnoredEntityTypes: ['DATE'],
+      privacyProtectLocalProviders: true,
+      privacyEmbeddingsPolicy: 'local_only',
+    });
+  });
+
+  it('leaves out a stored privacy mode that is not one, so a restore keeps the target mode', async () => {
+    mockFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+    mockFindUnique.mockResolvedValue({
+      ...settingsRow,
+      privacyMode: 'pseudonymize',
+      privacyIgnoredEntityTypes: 'DATE',
+      privacyProtectLocalProviders: false,
+      privacyEmbeddingsPolicy: 'local-only',
+    });
+
+    const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+    expect(payload.data.settings).not.toHaveProperty('privacyMode');
+    expect(payload.data.settings?.privacyIgnoredEntityTypes).toEqual([]);
+    // An unreadable policy exports as the stricter one, as the layer reads it.
+    expect(payload.data.settings?.privacyEmbeddingsPolicy).toBe('local_only');
+  });
+
   it('webhook entries do not have a secret field (secrets are never exported)', async () => {
     // The Prisma select excludes secret — the row never has it
     mockFindMany
@@ -340,6 +427,20 @@ describe('exportOrchestrationConfig', () => {
     expect(payload.data.webhooks).toHaveLength(1);
     expect(payload.data.webhooks[0]).not.toHaveProperty('secret');
     expect(payload.data.webhooks[0].url).toBe('https://example.com/hook');
+  });
+
+  it("carries no org's own AI key and not the switch for them (§137 t-1044)", async () => {
+    mockFindMany.mockResolvedValue([]);
+    mockFindUnique.mockResolvedValue(settingsRow);
+
+    await exportOrchestrationConfig(SHARED_SCOPE);
+
+    // The keys' table is never read, so no key or envelope can reach a backup.
+    expect(queryLog.entries.map((entry) => entry.model)).not.toContain('aiOrgProviderKey');
+    // The switch is this install's custody decision: never asked for, so never
+    // written out. (The mock ignores `select`, so the query is what is asserted.)
+    const [settingsQuery] = mockFindUnique.mock.calls[0] as [{ select: Record<string, unknown> }];
+    expect(settingsQuery.select).not.toHaveProperty('orgProviderKeysEnabled');
   });
 
   it('narrows an email-channel webhook to the "email" literal', async () => {
@@ -539,6 +640,130 @@ describe('exportOrchestrationConfig', () => {
 
     expect(payload.data.agents[0].knowledgeAccessMode).toBe('restricted');
   });
+
+  it.each([
+    ['its mode', 'redact', 'redact'],
+    ['none for no mode', null, null],
+    // Left out, as a settings mode that is not one is: a restore then keeps
+    // the target agent's own mode rather than read none and loosen it.
+    ['absent for a stored value that is not a mode', 'off', undefined],
+  ])("exports an agent's LLM privacy mode as %s", async (_label, stored, exported) => {
+    mockFindMany
+      .mockResolvedValueOnce([{ ...agentRow, privacyMode: stored }]) // agents
+      .mockResolvedValueOnce([]) // capabilities
+      .mockResolvedValueOnce([]) // workflows
+      .mockResolvedValueOnce([]); // webhooks
+    mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+    mockFindUnique.mockResolvedValue(null);
+
+    const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+    expect(payload.data.agents[0].privacyMode).toBe(exported);
+    expect('privacyMode' in payload.data.agents[0]).toBe(exported !== undefined);
+  });
+
+  it.each([
+    ['its policy', 'local_only', 'local_only'],
+    ['none for inheriting', null, null],
+    ['absent for a stored value that is not a policy', 'ask_first', undefined],
+  ])(
+    "exports an agent's confidential-content policies as %s (§130 t-1037)",
+    async (_label, stored, exported) => {
+      mockFindMany
+        .mockResolvedValueOnce([
+          {
+            ...agentRow,
+            privacyConfidentialPersonal: stored,
+            privacyConfidentialCommercial: stored,
+          },
+        ])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+      mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+      mockFindUnique.mockResolvedValue(null);
+
+      const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+      const agent = payload.data.agents[0] as Record<string, unknown>;
+
+      for (const field of ['privacyConfidentialPersonal', 'privacyConfidentialCommercial']) {
+        expect(agent[field]).toBe(exported);
+        expect(field in agent).toBe(exported !== undefined);
+      }
+    }
+  );
+
+  it("exports the install's confidential-content policies, an unreadable one as block (§130 t-1037)", async () => {
+    mockFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+    mockFindUnique.mockResolvedValue({
+      ...settingsRow,
+      privacyMode: 'detect',
+      privacyIgnoredEntityTypes: [],
+      privacyProtectLocalProviders: false,
+      privacyEmbeddingsPolicy: 'allow',
+      privacyConfidentialPersonal: 'warn',
+      privacyConfidentialCommercial: 'garbled',
+    });
+
+    const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+    expect(mockFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          privacyConfidentialPersonal: true,
+          privacyConfidentialCommercial: true,
+        }),
+      })
+    );
+    expect(payload.data.settings).toMatchObject({
+      privacyConfidentialPersonal: 'warn',
+      privacyConfidentialCommercial: 'block',
+    });
+  });
+
+  it.each([
+    [
+      'both halves as one binding',
+      { confidentialModelProvider: 'ollama-local', confidentialModel: 'llama3.1:8b' },
+      { providerSlug: 'ollama-local', model: 'llama3.1:8b' },
+    ],
+    ['none as null', { confidentialModelProvider: null, confidentialModel: null }, null],
+    [
+      'half a binding as null',
+      { confidentialModelProvider: 'ollama-local', confidentialModel: null },
+      null,
+    ],
+  ])(
+    'exports the model for confidential messages: %s (§130 t-1038)',
+    async (_l, cols, exported) => {
+      mockFindMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+      mockFindMany.mockResolvedValueOnce([]); // knowledgeTags
+      mockFindUnique.mockResolvedValue({ ...settingsRow, ...cols });
+
+      const payload = await exportOrchestrationConfig(SHARED_SCOPE);
+
+      expect(mockFindUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({
+            confidentialModelProvider: true,
+            confidentialModel: true,
+          }),
+        })
+      );
+      expect(payload.data.settings?.confidentialModel).toEqual(exported);
+      // The two columns are not on the wire.
+      expect(payload.data.settings).not.toHaveProperty('confidentialModelProvider');
+    }
+  );
 
   it('emits knowledgeAccessMode as "full" for any non-restricted value', async () => {
     // Any value that is not 'restricted' coerces to 'full' (the else branch)

@@ -42,11 +42,23 @@ vi.mock('@/lib/logging', () => ({
 }));
 
 vi.mock('@/lib/orchestration/llm/provider-manager', () => ({
+  // The platform's key, never an org's own (§137).
+  usesOrgOwnKey: () => false,
   getProviderWithFallbacks: vi.fn(),
 }));
 
 vi.mock('@/lib/orchestration/llm/agent-resolver', () => ({
   resolveAgentProviderAndModel: vi.fn(),
+}));
+
+// Routing for confidential content (§130 t-1038) is proved in its own tests;
+// here it keeps the binding unless a test says otherwise.
+vi.mock('@/lib/orchestration/llm/confidential-route', () => ({
+  routeConfidentialTurn: vi.fn(async ({ binding }: { binding: unknown }) => ({
+    kind: 'stay',
+    binding,
+    found: [],
+  })),
 }));
 
 vi.mock('@/lib/orchestration/llm/cost-tracker', () => ({
@@ -86,6 +98,7 @@ import { getCapabilityDefinitions } from '@/lib/orchestration/capabilities/regis
 import { capabilityDispatcher } from '@/lib/orchestration/capabilities/dispatcher';
 import { interpolatePrompt } from '@/lib/orchestration/engine/llm-runner';
 import { getOrchestrationSettings } from '@/lib/orchestration/settings';
+import { routeConfidentialTurn } from '@/lib/orchestration/llm/confidential-route';
 import type { TurnEntry, WorkflowStep } from '@/types/orchestration';
 import type { ExecutionContext } from '@/lib/orchestration/engine/context';
 import { MockTracer } from '@/tests/helpers/mock-tracer';
@@ -95,6 +108,11 @@ import { createContext } from '@/lib/orchestration/engine/context';
 import { logger } from '@/lib/logging';
 import { ProviderCallRefusedError } from '@/lib/orchestration/llm/provider-eligibility';
 import { turnEntriesSchema } from '@/lib/validations/orchestration';
+import {
+  createPrivacyScope,
+  currentPrivacyScope,
+  runInPrivacyScope,
+} from '@/lib/orchestration/privacy/scope';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -237,6 +255,50 @@ describe('executeAgentCall', () => {
     expect(prisma.aiAgent.findFirst).toHaveBeenCalledWith({
       where: { slug: 'eval-judge-relevance', isActive: true, isSystem: true },
       include: { profile: true },
+    });
+  });
+
+  describe('privacy scope (§127 t-1010)', () => {
+    it("runs the agent's calls in a scope carrying its id, inside the step's", async () => {
+      const step = createPrivacyScope({ scopeId: 'execution:exec_1:step:step1', orgId: 'org_1' });
+      const seen: { agentId?: string; orgId?: string; parent?: unknown }[] = [];
+      mockChat.mockImplementation(async () => {
+        const s = currentPrivacyScope();
+        seen.push({ agentId: s?.agentId, orgId: s?.orgId, parent: s?.parent });
+        return { content: 'done', usage: { inputTokens: 1, outputTokens: 1 }, model: 'm' };
+      });
+
+      await runInPrivacyScope(step, () => executeAgentCall(makeStep(), makeCtx()));
+
+      // What the stage hands the resolvers as `PolicyInput.agentId` and `orgId`.
+      expect(seen).toEqual([{ agentId: MOCK_AGENT.id, orgId: 'org_1', parent: step }]);
+      // The step's own scope is not bound to the agent.
+      expect(step.agentId).toBeUndefined();
+    });
+
+    it('keeps two agents apart when an orchestrator runs them at once on one step scope', async () => {
+      const step = createPrivacyScope({ scopeId: 'execution:exec_1:step:orch' });
+      vi.mocked(prisma.aiAgent.findFirst).mockImplementation((async (query: {
+        where: { slug: string };
+      }) => ({ ...MOCK_AGENT, id: `agent_${query.where.slug}`, slug: query.where.slug })) as never);
+      const seen = new Map<string, string | undefined>();
+      mockChat.mockImplementation(async (messages: { content: string }[]) => {
+        // Let the other delegation start before this one reads its scope.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        seen.set(messages[messages.length - 1].content, currentPrivacyScope()?.agentId);
+        return { content: 'done', usage: { inputTokens: 1, outputTokens: 1 }, model: 'm' };
+      });
+      vi.mocked(interpolatePrompt).mockImplementation((template: string) => template);
+
+      await runInPrivacyScope(step, () =>
+        Promise.all([
+          executeAgentCall(makeStep({ agentSlug: 'hr', message: 'to hr' }), makeCtx()),
+          executeAgentCall(makeStep({ agentSlug: 'faq', message: 'to faq' }), makeCtx()),
+        ])
+      );
+
+      expect(seen.get('to hr')).toBe('agent_hr');
+      expect(seen.get('to faq')).toBe('agent_faq');
     });
   });
 
@@ -2245,5 +2307,46 @@ describe('executeAgentCall', () => {
       expect(result.tokensUsed).toBe(priorTokensTotal + newIterationTokens);
       expect(result.costUsd).toBeCloseTo(priorCostTotal + newIterationCost);
     });
+  });
+});
+
+describe('executeAgentCall — the model for confidential messages (§130 t-1038)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupDefaultMocks();
+  });
+
+  it('answers on the binding routing moved it to, routed on what the step sends', async () => {
+    const provenance = {
+      task: 'chat' as const,
+      primary: 'explicit' as const,
+      fallbacks: 'explicit' as const,
+    };
+    let scopedTo: string | undefined;
+    vi.mocked(routeConfidentialTurn).mockImplementationOnce(async () => {
+      scopedTo = currentPrivacyScope()?.agentId;
+      return {
+        kind: 'move',
+        binding: { providerSlug: 'ollama-local', model: 'llama3.1:8b', fallbacks: [], provenance },
+        to: 'local',
+        found: ['personal'],
+      };
+    });
+
+    await executeAgentCall(makeStep(), makeCtx());
+
+    expect(routeConfidentialTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({ providerSlug: 'anthropic' }),
+        messages: [
+          { role: 'system', content: '[Instructions]\nYou are a summarizer.' },
+          { role: 'user', content: 'Summarize: hello' },
+        ],
+      })
+    );
+    // In the agent's own privacy scope, so its policy decides.
+    expect(scopedTo).toBe('agent_1');
+    expect(getProviderWithFallbacks).toHaveBeenCalledWith('ollama-local', [], provenance);
+    expect(mockChat.mock.calls[0][1]).toMatchObject({ model: 'llama3.1:8b' });
   });
 });

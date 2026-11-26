@@ -71,6 +71,9 @@ vi.mock('@/lib/orchestration/llm/provider-manager', () => {
   return {
     getProviderWithFallbacks: vi.fn(),
     getProvider,
+    // The platform's key, never an org's own (§137).
+    providerUsesOrgOwnKey: vi.fn(async () => false),
+    usesOrgOwnKey: vi.fn(() => false),
     // Failover fetches through this; delegate, with a closed breaker.
     getProviderIfBreakerClosed: vi.fn(async (slug: string, context?: unknown) => ({
       provider: (await getProvider(slug, context)) as unknown,
@@ -115,7 +118,7 @@ vi.mock('@/lib/orchestration/chat/input-guard', () => ({
 }));
 
 vi.mock('@/lib/orchestration/chat/output-guard', () => ({
-  scanOutput: vi.fn().mockReturnValue({ flagged: false }),
+  scanOutput: vi.fn().mockResolvedValue({ flagged: false }),
   scanCitations: vi.fn().mockReturnValue({ flagged: false }),
 }));
 
@@ -652,7 +655,7 @@ describe('StreamingChatHandler — OTEL span tree (integration)', () => {
     });
 
     // Output guard fires and blocks
-    vi.mocked(scanOutput).mockReturnValue({
+    vi.mocked(scanOutput).mockResolvedValue({
       flagged: true,
       topicMatches: ['off-topic'],
       builtInMatches: [],

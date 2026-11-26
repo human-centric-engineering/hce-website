@@ -270,8 +270,10 @@ export const SUBJECT_DATA_SOURCES: SubjectDataSource[] = [
     // say where the subject's own act happened and nothing of the org's. They
     // stay on erasure for the same reason the row does: once `userId` is
     // null they name no one, and the org reads its support history by them.
+    // `actingOrgId` (t-1005) is the org every act was made in, support or
+    // not, kept on erasure for the same reason.
     description:
-      'Admin configuration changes the subject made, including the IP address recorded and, for a change made while working in a customer organisation as support, which organisation and grant.',
+      'Admin configuration changes the subject made, including the IP address recorded, which organisation each change was made in and, for a change made while working in a customer organisation as support, which grant.',
     fetch: ({ userId }) =>
       prisma.aiAdminAuditLog.findMany({ where: { userId }, orderBy: byCreatedAt }),
   },
@@ -485,6 +487,32 @@ export const SUBJECT_DATA_SOURCES: SubjectDataSource[] = [
         id: row.id,
         label: `${row.open ? 'Opened' : 'Closed'} the ${row.list} waitlist`,
         createdAt: row.changedAt,
+      }));
+    },
+  },
+  {
+    // `SetNull`: the key is the org's, not the person's (§137 t-1044). What
+    // the subject receives is that they last saved it, never the key or its hint.
+    model: 'AiOrgProviderKey',
+    section: 'orgProviderKeysSaved',
+    disposition: 'attribution',
+    description:
+      'AI provider keys the subject last saved for an organisation, as one of its administrators. The keys are not included.',
+    fetch: async ({ userId }: SubjectQuery): Promise<AttributionRow[]> => {
+      const rows = await prisma.aiOrgProviderKey.findMany({
+        where: { savedById: userId },
+        select: {
+          id: true,
+          savedAt: true,
+          providerConfig: { select: { name: true } },
+          org: { select: { name: true } },
+        },
+        orderBy: { savedAt: 'asc' },
+      });
+      return rows.map((row) => ({
+        id: row.id,
+        label: `Saved ${row.org.name}'s key for ${row.providerConfig.name}`,
+        createdAt: row.savedAt,
       }));
     },
   },

@@ -12,6 +12,7 @@ Each script has an `npm run smoke:<slice>` entry in `package.json`:
 
 ```bash
 npm run smoke:chat           # Phase 2c streaming chat handler
+npm run smoke:privacy        # §127 LLM privacy layer: no seeded identifier reaches a provider (pseudonymise)
 npm run smoke:orchestration  # Phase 3 admin orchestration HTTP surface (requires dev server)
 npm run smoke:transcribe     # Audio (speech-to-text): getAudioProvider → transcribe() round-trip
 npm run smoke:capability-ownership  # #598 guard vs. Postgres jsonb key re-ordering
@@ -19,6 +20,7 @@ npm run smoke:epub                  # EPUB ingestion through a real (ideally pro
 npm run smoke:tenancy               # the install-org invariant, org lifecycle, export/erase (CI: `smoke`)
 npm run smoke:delivery-destination  # webhook/hook deliveries record their destination and outlive their sender (CI: `smoke`)
 npm run smoke:tenancy-isolation     # two orgs at TENANCY_MODE=multi as the restricted role — THROWAWAY DB only (CI: `smoke-multi`)
+npm run smoke:model-move            # §136 model move: two orgs at TENANCY_MODE=multi, each moved in its own scope (dev DB or throwaway)
 ```
 
 Or directly:

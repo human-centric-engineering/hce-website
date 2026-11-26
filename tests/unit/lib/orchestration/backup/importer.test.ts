@@ -358,6 +358,46 @@ describe('importOrchestrationConfig', () => {
     expect(result.agents.updated).toBe(0);
   });
 
+  it("restores an agent's LLM privacy mode, and inherits when the backup predates it (§127 t-1010)", async () => {
+    mockTx.aiAgent.findFirst.mockResolvedValue(null);
+    mockTx.aiAgent.create.mockResolvedValue({});
+    const { privacyMode: _absent, ...older } = makeAgent() as Record<string, unknown>;
+    const payload = {
+      ...minPayload,
+      data: {
+        ...minPayload.data,
+        agents: [
+          { ...makeAgent(), slug: 'hr', privacyMode: 'redact' },
+          { ...older, slug: 'faq' },
+        ],
+      },
+    };
+
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const created = mockTx.aiAgent.create.mock.calls.map(
+      (call) => (call[0] as { data: { slug: string; privacyMode: unknown } }).data
+    );
+    expect(created.find((d) => d.slug === 'hr')?.privacyMode).toBe('redact');
+    // Left out, so the column's default applies: null, the install's mode.
+    expect(created.find((d) => d.slug === 'faq')?.privacyMode).toBeUndefined();
+  });
+
+  it('restores an agent privacy mode that is not one as stored, so the rest of the backup restores and that agent keeps refusing', async () => {
+    mockTx.aiAgent.findFirst.mockResolvedValue(null);
+    mockTx.aiAgent.create.mockResolvedValue({});
+    const payload = {
+      ...minPayload,
+      data: { ...minPayload.data, agents: [{ ...makeAgent(), privacyMode: 'strict_block' }] },
+    };
+
+    const result = await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    expect(result.agents.created).toBe(1);
+    const data = mockTx.aiAgent.create.mock.calls[0][0].data as { privacyMode: unknown };
+    expect(data.privacyMode).toBe('strict_block');
+  });
+
   it('does not leak the dropped `knowledgeCategories` column into create on a fresh target (#353)', async () => {
     // The CREATE branch spreads the parsed agent into `tx.aiAgent.create`.
     // `knowledgeCategories` is kept on the wire (back-compat) but was dropped from
@@ -411,6 +451,50 @@ describe('importOrchestrationConfig', () => {
     expect(mockTx.aiAgent.create).not.toHaveBeenCalled();
     expect(result.agents.updated).toBe(1);
     expect(result.agents.created).toBe(0);
+  });
+
+  it.each([
+    ['keeps the agent’s own mode when the backup predates it', undefined, false, undefined],
+    ['writes the backup’s mode', 'block', true, 'block'],
+    ['clears it when the backup says none', null, true, null],
+  ])('on overwrite %s (§127 t-1010)', async (_label, inBackup, written, value) => {
+    mockTx.aiAgent.findFirst.mockResolvedValue({ id: 'existing-id', slug: 'support-bot' });
+    mockTx.aiAgent.update.mockResolvedValue({});
+    const { privacyMode: _absent, ...older } = makeAgent() as Record<string, unknown>;
+    const agent = inBackup === undefined ? older : { ...older, privacyMode: inBackup };
+    const payload = { ...minPayload, data: { ...minPayload.data, agents: [agent] } };
+
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const data = mockTx.aiAgent.update.mock.calls[0][0].data as Record<string, unknown>;
+    expect('privacyMode' in data).toBe(written);
+    expect(data.privacyMode).toBe(value);
+  });
+
+  it.each([
+    ['keeps the agent’s own policies when the backup predates them', undefined, false, undefined],
+    ['writes the backup’s policies', 'local_only', true, 'local_only'],
+    ['clears them when the backup says inherit', null, true, null],
+  ])('on overwrite %s (§130 t-1037)', async (_label, inBackup, written, value) => {
+    mockTx.aiAgent.findFirst.mockResolvedValue({ id: 'existing-id', slug: 'support-bot' });
+    mockTx.aiAgent.update.mockResolvedValue({});
+    const agent =
+      inBackup === undefined
+        ? makeAgent()
+        : {
+            ...makeAgent(),
+            privacyConfidentialPersonal: inBackup,
+            privacyConfidentialCommercial: inBackup,
+          };
+    const payload = { ...minPayload, data: { ...minPayload.data, agents: [agent] } };
+
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const data = mockTx.aiAgent.update.mock.calls[0][0].data as Record<string, unknown>;
+    for (const field of ['privacyConfidentialPersonal', 'privacyConfidentialCommercial']) {
+      expect(field in data).toBe(written);
+      expect(data[field]).toBe(value);
+    }
   });
 
   it("saves an overwritten agent's restored config as a new agent version, after its grants", async () => {
@@ -647,6 +731,65 @@ describe('importOrchestrationConfig', () => {
     expect(invalidateSettingsCache).toHaveBeenCalledOnce();
   });
 
+  it('restores a model pin in defaultModels verbatim, naming its provider (§136 t-1068)', async () => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    const defaultModels = {
+      chat: 'microsoft::gpt-4o',
+      routing: 'gpt-4o-mini', // a bare id saved before pins named a provider
+      embeddings: 'text-embedding-3-small',
+    };
+
+    const payload = {
+      ...minPayload,
+      data: { ...minPayload.data, settings: { ...makeSettings(), defaultModels } },
+    };
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    expect(mockTx.aiOrchestrationSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ defaultModels }),
+        update: expect.objectContaining({ defaultModels }),
+      })
+    );
+  });
+
+  it("keeps a step's provider-named modelOverride in the imported version snapshot (§136 t-1068)", async () => {
+    mockTx.aiWorkflow.findUnique.mockResolvedValue(null);
+    mockTx.aiWorkflow.create.mockResolvedValue({ id: 'wf-1' });
+    mockTx.aiWorkflow.update.mockResolvedValue({ id: 'wf-1' });
+    mockTx.aiWorkflowVersion.create.mockResolvedValue({ id: 'wfv-1', version: 1 });
+    const workflow = makeWorkflow({
+      workflowDefinition: {
+        steps: [
+          {
+            id: 'step-1',
+            name: 'Step One',
+            type: 'llm_call',
+            config: { prompt: 'hi', modelOverride: 'microsoft::gpt-4o' },
+            nextSteps: [],
+          },
+        ],
+        entryStepId: 'step-1',
+        errorStrategy: 'fail',
+      },
+    });
+
+    const payload = { ...minPayload, data: { ...minPayload.data, workflows: [workflow] } };
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    expect(mockTx.aiWorkflowVersion.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        snapshot: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              config: { prompt: 'hi', modelOverride: 'microsoft::gpt-4o' },
+            }),
+          ],
+        }),
+      }),
+    });
+  });
+
   it('restores the failed-webhook retention window (#838)', async () => {
     mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
 
@@ -659,6 +802,119 @@ describe('importOrchestrationConfig', () => {
     const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
     expect(call.create.webhookDlqRetentionDays).toBe(45);
     expect(call.update.webhookDlqRetentionDays).toBe(45);
+  });
+
+  it('restores the LLM privacy settings (§127)', async () => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    const privacy = {
+      privacyMode: 'off',
+      privacyIgnoredEntityTypes: ['DATE'],
+      privacyProtectLocalProviders: true,
+      privacyEmbeddingsPolicy: 'local_only',
+    };
+    const payload = {
+      ...minPayload,
+      data: { ...minPayload.data, settings: { ...makeSettings(), ...privacy } },
+    };
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+    expect(call.create).toMatchObject(privacy);
+    expect(call.update).toMatchObject(privacy);
+  });
+
+  it("restores the install's confidential-content policies (§130 t-1037)", async () => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    const policies = {
+      privacyConfidentialPersonal: 'local_only',
+      privacyConfidentialCommercial: 'approved_only',
+    };
+    const payload = {
+      ...minPayload,
+      data: { ...minPayload.data, settings: { ...makeSettings(), ...policies } },
+    };
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+    expect(call.create).toMatchObject(policies);
+    expect(call.update).toMatchObject(policies);
+  });
+
+  it.each([
+    [
+      'writes the backup’s model',
+      { providerSlug: 'ollama-local', model: 'llama3.1:8b' },
+      { confidentialModelProvider: 'ollama-local', confidentialModel: 'llama3.1:8b' },
+    ],
+    [
+      'clears it when the backup has none',
+      null,
+      { confidentialModelProvider: null, confidentialModel: null },
+    ],
+  ])('restores the model for confidential messages: %s (§130 t-1038)', async (_l, model, cols) => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    const payload = {
+      ...minPayload,
+      data: { ...minPayload.data, settings: { ...makeSettings(), confidentialModel: model } },
+    };
+    await importOrchestrationConfig(payload, 'user-1', SHARED_SCOPE);
+
+    const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+    expect(call.create).toMatchObject(cols);
+    expect(call.update).toMatchObject(cols);
+  });
+
+  it('leaves the model for confidential messages alone when the backup predates it', async () => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    await importOrchestrationConfig(
+      { ...minPayload, data: { ...minPayload.data, settings: makeSettings() } },
+      'user-1',
+      SHARED_SCOPE
+    );
+
+    const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+    expect('confidentialModel' in call.update).toBe(false);
+    expect('confidentialModelProvider' in call.update).toBe(false);
+  });
+
+  it.each(['pseudonymise', 'redact', 'block'])(
+    'restores the masking mode %s now that this version can apply it',
+    async (mode) => {
+      mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+      const result = await importOrchestrationConfig(
+        {
+          ...minPayload,
+          data: { ...minPayload.data, settings: { ...makeSettings(), privacyMode: mode } },
+        },
+        'user-1',
+        SHARED_SCOPE
+      );
+      const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+      expect(call.update.privacyMode).toBe(mode);
+      expect(call.create.privacyMode).toBe(mode);
+      expect(result.warnings.join(' ')).not.toMatch(/privacy mode/);
+    }
+  );
+
+  it('leaves the current privacy settings alone when the backup predates them', async () => {
+    mockTx.aiOrchestrationSettings.upsert.mockResolvedValue({});
+    await importOrchestrationConfig(
+      { ...minPayload, data: { ...minPayload.data, settings: makeSettings() } },
+      'user-1',
+      SHARED_SCOPE
+    );
+    const call = mockTx.aiOrchestrationSettings.upsert.mock.calls[0][0];
+    for (const key of [
+      'privacyMode',
+      'privacyIgnoredEntityTypes',
+      'privacyProtectLocalProviders',
+      'privacyEmbeddingsPolicy',
+      'privacyConfidentialPersonal',
+      'privacyConfidentialCommercial',
+    ]) {
+      expect(call.update).not.toHaveProperty(key);
+      expect(call.create).not.toHaveProperty(key);
+    }
   });
 
   it('leaves the current failed-webhook window alone when the backup predates it', async () => {

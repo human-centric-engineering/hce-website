@@ -6,6 +6,12 @@
  * evaluation, cost tracking, and provider configuration.
  */
 
+import type { EmbeddingsPolicy } from '@/lib/orchestration/privacy/settings-policy';
+import type {
+  ConfidentialPolicy,
+  PrivacyMode,
+  SensitivityGroup,
+} from '@/lib/privacy/adapters/types';
 import type {
   User,
   AiAgent,
@@ -546,6 +552,12 @@ export interface ExecutionTraceEntry {
    * detail; it is the workflow-step analogue of chat citations.
    */
   provenance?: ProvenanceItem[];
+  /**
+   * What the LLM privacy layer found in this step's provider calls (§127),
+   * including calls a capability made. Counts only. Absent when the layer
+   * scanned no call.
+   */
+  privacy?: PrivacySummary;
   /**
    * View-time enrichment for `agent_call` steps. The API loader resolves
    * the step's `config.agentSlug` against the current AiAgent registry
@@ -1143,6 +1155,57 @@ export interface SystemInstructionsHistoryEntry {
 // ============================================================================
 
 /**
+ * What the LLM privacy layer found across the provider calls of one chat
+ * turn or one workflow step (§127). Counts by entity type and adapter ids
+ * only: never a value, never request text. Absent when the layer scanned no
+ * call (mode `off`, or only local providers).
+ *
+ * @see .context/privacy/llm-privacy-layer.md
+ */
+export interface PrivacySummary {
+  /** The strictest mode any scanned call ran under. */
+  mode: PrivacyMode;
+  /** Chat calls scanned. */
+  calls: number;
+  /** Detections in chat calls, by entity type. */
+  counts: Record<string, number>;
+  /** Embedding calls scanned. Counted, never altered. */
+  embeddingCalls: number;
+  /** Detections in embedding inputs, by entity type. */
+  embeddingCounts: Record<string, number>;
+  /** A detector failed on a call and the call went ahead without it. */
+  degraded?: true;
+  /** Ids of the adapters that failed. */
+  failedAdapters?: string[];
+  /** Why the stage refused calls, when it did (`PrivacyRefusalReason` values). Nothing was sent on those. */
+  refused?: string[];
+  /** Placeholders a reply wrote that no call issued, left visible as written. */
+  unresolved?: number;
+  /**
+   * Confidential content found in what the calls sent, by group: category
+   * names only, each list sorted (§130). Absent when none was found.
+   */
+  sensitivity?: Partial<Record<SensitivityGroup, string[]>>;
+  /**
+   * What the confidential-content policy did with the calls that held each
+   * group's content (§130): every decision any of them got, in
+   * {@link CONFIDENTIAL_DECISIONS} order, so a turn whose chat call was sent
+   * and whose knowledge-search embedding was refused reads both. Absent for a
+   * group nothing was found of.
+   */
+  confidential?: Partial<Record<SensitivityGroup, ConfidentialDecision[]>>;
+}
+
+/**
+ * What a confidential-content policy did with a call holding a group's
+ * content (§130), least to most strict: sent (`allowed`), sent and the user
+ * told once (`warned`), or not sent (`refused`).
+ */
+export const CONFIDENTIAL_DECISIONS = ['allowed', 'warned', 'refused'] as const;
+
+export type ConfidentialDecision = (typeof CONFIDENTIAL_DECISIONS)[number];
+
+/**
  * Diagnostic metadata stored in `AiMessage.metadata`.
  *
  * Shape varies by message role:
@@ -1188,6 +1251,11 @@ export interface MessageMetadata {
    * Display only — the replayable thinking blocks are not stored here.
    */
   reasoningSummary?: string;
+  /**
+   * What the LLM privacy layer found in the turn's provider calls (§127).
+   * Set on the terminal assistant message; counts only.
+   */
+  privacy?: PrivacySummary;
   // Present on tool messages
   toolCall?: { id: string; name: string; arguments: unknown };
   result?: unknown;
@@ -1204,6 +1272,16 @@ export interface MessageMetadata {
   // Present on error-marker messages (persisted when streaming fails completely)
   error?: boolean;
   errorCode?: string;
+  /**
+   * Set on every row a chat turn persisted when the privacy layer refused the
+   * turn under `block` (§127 t-1014): its user message, and any assistant
+   * tool-call and tool-result rows from earlier iterations of the tool loop.
+   * The rows stay in the transcript and the audit trail; every reader that
+   * resends a conversation to a provider leaves them out
+   * (`isLeftOutOfHistory`), so the next turn does not carry the details the
+   * policy refused, and the conversation can go on.
+   */
+  excludedFromHistory?: 'privacy_blocked' | 'privacy_confidential';
   /**
    * Set on the assistant message persisted when the streaming chat
    * handler aborts a turn before the LLM signalled completion. The
@@ -1687,8 +1765,49 @@ export interface OrchestrationSettings {
    * `lib/orchestration/llm/cost-caps.ts`.
    */
   defaultMaxCostPerTurnUsd: number | null;
+  /**
+   * The LLM privacy layer's install-wide mode (§127). `null` when the stored
+   * value is not a mode: the privacy stage then refuses every protected call
+   * until it is fixed, rather than guess. `off` on an install upgraded to it,
+   * `detect` on a new one.
+   */
+  privacyMode: PrivacyMode | null;
+  /** Entity types the privacy layer leaves alone. Exclusions, so a new type is protected. */
+  privacyIgnoredEntityTypes: string[];
+  /** Apply the privacy layer to `isLocal` providers too. */
+  privacyProtectLocalProviders: boolean;
+  /**
+   * `allow` or `local_only`: under `pseudonymise` or stricter, `local_only`
+   * refuses an embedding call to a provider that is not `isLocal`.
+   */
+  privacyEmbeddingsPolicy: EmbeddingsPolicy;
+  /**
+   * What a call holding confidential content of each group may do (§130).
+   * `allow` on an install upgraded to it; on a new one, `warn` for Personal
+   * and `allow` for Commercial. An agent's own policy only tightens these.
+   */
+  privacyConfidentialPersonal: ConfidentialPolicy;
+  privacyConfidentialCommercial: ConfidentialPolicy;
+  /**
+   * The model for confidential messages (§130 t-1038): a turn whose agent's
+   * provider a group's policy does not permit is answered on it instead.
+   * `null` when not set, and then such a turn is refused.
+   */
+  confidentialModel: ConfidentialModelBinding | null;
+  /**
+   * Organisations' own AI keys (§137 t-1044): while on, an org's calls on a
+   * provider row it has saved a key for go out on that key. Off by default;
+   * turned on only while a sealed-secret master key is configured.
+   */
+  orgProviderKeysEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** A provider and one of its models: the model for confidential messages (§130 t-1038). */
+export interface ConfidentialModelBinding {
+  providerSlug: string;
+  model: string;
 }
 
 /**

@@ -22,6 +22,8 @@ export const API = {
     /** better-auth catch-all */
     BASE: '/api/auth',
     SIGN_OUT: '/api/auth/sign-out',
+    /** Send a verification email to an unverified address (rate limited) */
+    SEND_VERIFICATION_EMAIL: '/api/auth/send-verification-email',
   },
 
   /** Current user endpoints */
@@ -40,6 +42,10 @@ export const API = {
   /** Invitation endpoints (public, token-gated) */
   INVITATIONS: {
     METADATA: '/api/v1/invitations/metadata',
+    /** Accept as an account that already exists — needs a session (#1199) */
+    ACCEPT: '/api/v1/invitations/accept',
+    /** Decline — token-gated, no session needed (#1199) */
+    DECLINE: '/api/v1/invitations/decline',
   },
 
   /** Org endpoints (§106) */
@@ -50,6 +56,8 @@ export const API = {
     SWITCH: '/api/v1/orgs/switch',
     /** One org, as one of its members */
     byId: (id: string): string => `/api/v1/orgs/${id}`,
+    /** An org's default interface language (OWNER/ADMIN of that org, §138) */
+    locale: (id: string): string => `/api/v1/orgs/${id}/locale`,
     /** An org's roster (OWNER/ADMIN of that org) */
     members: (id: string): string => `/api/v1/orgs/${id}/members`,
     /** One membership (OWNER/ADMIN of that org) */
@@ -63,11 +71,25 @@ export const API = {
       `/api/v1/orgs/${id}/support-grants/${grantId}`,
     /** What support did under the org's grants (who reads the grants reads this) */
     supportActivity: (id: string): string => `/api/v1/orgs/${id}/support-grants/activity`,
+    /** The switches the org's own admins may set (`setBy: 'org'`; OWNER/ADMIN acting in the org, by default) */
+    entitlements: (id: string): string => `/api/v1/orgs/${id}/entitlements`,
+    /** The org's own AI keys and their state (OWNER/ADMIN acting in the org, by default) */
+    providerKeys: (id: string): string => `/api/v1/orgs/${id}/provider-keys`,
+    /** One provider's key: save or replace (PUT), remove (DELETE) */
+    providerKey: (id: string, providerId: string): string =>
+      `/api/v1/orgs/${id}/provider-keys/${providerId}`,
+    /** Test one provider's saved key with one cheap vendor call */
+    providerKeyTest: (id: string, providerId: string): string =>
+      `/api/v1/orgs/${id}/provider-keys/${providerId}/test`,
   },
 
   /** Admin endpoints */
   ADMIN: {
     STATS: '/api/v1/admin/stats',
+    /** Roles and access in the admin console, for the caller (§143) */
+    ACCESS: '/api/v1/admin/access',
+    /** Whether the settings that quietly switch features off are set (presence only, #865) */
+    CONFIG_HEALTH: '/api/v1/admin/config-health',
     LOGS: '/api/v1/admin/logs',
     INVITATIONS: '/api/v1/admin/invitations',
     /** Every org, the vendor's view */
@@ -78,9 +100,19 @@ export const API = {
     orgExport: (id: string): string => `/api/v1/admin/orgs/${id}/export`,
     /** An org's approved providers and jurisdictions (§120) */
     orgProviders: (id: string): string => `/api/v1/admin/orgs/${id}/providers`,
-    /** Delete invitation by email */
-    invitationByEmail: (email: string): string =>
-      `/api/v1/admin/invitations/${encodeURIComponent(email)}`,
+    /** An org's LLM privacy minimum and protected terms (§127) */
+    orgPrivacy: (id: string): string => `/api/v1/admin/orgs/${id}/privacy`,
+    /** An org's entitlement switches (§135) */
+    orgEntitlements: (id: string): string => `/api/v1/admin/orgs/${id}/entitlements`,
+    /** An org's meters and their limits (§135) */
+    orgMeters: (id: string): string => `/api/v1/admin/orgs/${id}/meters`,
+    /**
+     * Delete invitation by email. With `orgId` (`null` for the install org)
+     * only that org's invitation goes; without it, every org's (#1199).
+     */
+    invitationByEmail: (email: string, orgId?: string | null): string =>
+      `/api/v1/admin/invitations/${encodeURIComponent(email)}` +
+      (orgId === undefined ? '' : `?orgId=${encodeURIComponent(orgId ?? 'install')}`),
     FEATURE_FLAGS: '/api/v1/admin/feature-flags',
     /** Feature flag by ID */
     featureFlag: (id: string): string => `/api/v1/admin/feature-flags/${id}`,
@@ -146,6 +178,10 @@ export const API = {
       PROVIDER_MODELS: '/api/v1/admin/orchestration/provider-models',
       providerModelById: (id: string): string =>
         `/api/v1/admin/orchestration/provider-models/${id}`,
+      providerModelMoveUses: (id: string): string =>
+        `/api/v1/admin/orchestration/provider-models/${id}/move-uses`,
+      providerModelMoveUsesPreview: (id: string): string =>
+        `/api/v1/admin/orchestration/provider-models/${id}/move-uses/preview`,
       PROVIDER_MODELS_BULK: '/api/v1/admin/orchestration/provider-models/bulk',
       PROVIDER_MODEL_RECOMMEND: '/api/v1/admin/orchestration/provider-models/recommend',
       DISCOVERY_MODELS: '/api/v1/admin/orchestration/discovery/models',
@@ -400,6 +436,8 @@ export const API = {
     WAITLIST: '/api/v1/waitlist',
     WAITLIST_CONFIRM: '/api/v1/waitlist/confirm',
     WAITLIST_LEAVE: '/api/v1/waitlist/leave',
+    /** A visitor's own choice of interface language, kept in a cookie (§138) */
+    LOCALE: '/api/v1/locale',
     CSP_REPORT: '/api/csp-report',
   },
 } as const;

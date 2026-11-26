@@ -476,6 +476,42 @@ describe('POST /agents/:id/versions/:versionId/restore', () => {
       });
     });
 
+    it('restores a version holding a privacy mode this release does not know, keeping it (§127 t-1010)', async () => {
+      // Refusing it would make every other field in the version unrecoverable;
+      // restored, the agent stays where it was: every call refused until a
+      // mode is chosen.
+      const { response, txAgentUpdate } = await restoreSnapshot({
+        privacyMode: 'strict_block',
+        description: 'Restored description',
+      });
+
+      expect(response.status).toBe(200);
+      expect(txAgentUpdate.mock.calls[0][0].data).toMatchObject({
+        privacyMode: 'strict_block',
+        description: 'Restored description',
+      });
+    });
+
+    it('restores a known privacy mode as before', async () => {
+      const { response, txAgentUpdate } = await restoreSnapshot({ privacyMode: 'redact' });
+
+      expect(response.status).toBe(200);
+      expect(txAgentUpdate.mock.calls[0][0].data).toMatchObject({ privacyMode: 'redact' });
+    });
+
+    it('restores the confidential-content policies, a value this release does not know included (§130 t-1037)', async () => {
+      const { response, txAgentUpdate } = await restoreSnapshot({
+        privacyConfidentialPersonal: 'local_only',
+        privacyConfidentialCommercial: 'ask_first',
+      });
+
+      expect(response.status).toBe(200);
+      expect(txAgentUpdate.mock.calls[0][0].data).toMatchObject({
+        privacyConfidentialPersonal: 'local_only',
+        privacyConfidentialCommercial: 'ask_first',
+      });
+    });
+
     it('still refuses a snapshot whose provider is not a string', async () => {
       const { response, txAgentUpdate } = await restoreSnapshot({ provider: 42 });
 

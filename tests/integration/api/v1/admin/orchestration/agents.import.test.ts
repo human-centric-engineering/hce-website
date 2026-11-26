@@ -387,6 +387,37 @@ describe('POST /api/v1/admin/orchestration/agents/import', () => {
   });
 
   describe('conflictMode: overwrite', () => {
+    it("keeps an agent's own privacy mode when the bundle predates it (§127 t-1010)", async () => {
+      vi.mocked(auth.api.getSession).mockResolvedValue(mockAdminUser());
+      const tx = getTxMock();
+      tx.aiAgent.findFirst.mockResolvedValue(makeDbAgent(AGENT_ID, 'existing-agent'));
+      const { privacyMode: _absent, ...older } = makeBundledAgent('existing-agent') as Record<
+        string,
+        unknown
+      >;
+
+      await POST(makeRequest({ bundle: makeBundle([older as never]), conflictMode: 'overwrite' }));
+
+      const data = tx.aiAgent.update.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data).not.toHaveProperty('privacyMode');
+    });
+
+    it("writes a bundle's confidential-content policies, and keeps the agent's own when it has none (§130 t-1037)", async () => {
+      vi.mocked(auth.api.getSession).mockResolvedValue(mockAdminUser());
+      const tx = getTxMock();
+      tx.aiAgent.findFirst.mockResolvedValue(makeDbAgent(AGENT_ID, 'existing-agent'));
+      const bundled = {
+        ...makeBundledAgent('existing-agent'),
+        privacyConfidentialPersonal: 'approved_only',
+      };
+
+      await POST(makeRequest({ bundle: makeBundle([bundled]), conflictMode: 'overwrite' }));
+
+      const data = tx.aiAgent.update.mock.calls[0][0].data as Record<string, unknown>;
+      expect(data.privacyConfidentialPersonal).toBe('approved_only');
+      expect(data).not.toHaveProperty('privacyConfidentialCommercial');
+    });
+
     it('updates existing agent and rebuilds capability pivots', async () => {
       vi.mocked(auth.api.getSession).mockResolvedValue(mockAdminUser());
       const existingAgent = makeDbAgent(AGENT_ID, 'existing-agent');

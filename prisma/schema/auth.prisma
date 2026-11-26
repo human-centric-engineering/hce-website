@@ -34,6 +34,11 @@ model User {
   bio         String? @db.Text // User biography (long text)
   phone       String? @db.VarChar(20) // Phone number
   timezone    String? @default("UTC") // IANA timezone (e.g., "America/New_York")
+  // The interface language this user chose (§138 t-1071): a BCP 47 tag, or
+  // null to follow their org's default and then the browser. Validated on
+  // write against the supported locales; a tag that later loses its
+  // catalogue is skipped by the resolution (lib/i18n/resolve.ts), not trusted.
+  locale      String? @db.VarChar(35)
   location    String? @db.VarChar(100) // Free-form location string
   preferences Json?   @default("{}") // Email preferences as JSON
 
@@ -91,6 +96,7 @@ model User {
   aiDatasets                        AiDataset[]                        @relation("AiDatasetUser")
   aiEvaluationRuns                  AiEvaluationRun[]                  @relation("AiEvaluationRunUser")
   aiProviderConfigs                 AiProviderConfig[]                 @relation("AiProviderConfigCreator")
+  aiOrgProviderKeysSaved            AiOrgProviderKey[]                 @relation("AiOrgProviderKeySavedBy")
   aiWebhookSubscriptions            AiWebhookSubscription[]            @relation("AiWebhookUser")
   aiInviteTokens                    AiAgentInviteToken[]               @relation("InviteTokenCreator")
   aiAgentVersions                   AiAgentVersion[]                   @relation("AgentVersionCreator")
@@ -108,6 +114,14 @@ model User {
   // MCP Server relations
   mcpApiKeys        McpApiKey[]        @relation("McpApiKeyCreator")
   mcpExposedPrompts McpExposedPrompt[] @relation("McpPromptCreator")
+
+  // Fork zones (sunrise#859), as on `Org` in tenancy.prisma: a fork model's
+  // `user` relation puts its back-relation line below its tier's marker, and
+  // Sunrise's own lines stay above them. Every such relation still needs its
+  // `onDelete` (CLAUDE.md, "New `User` relations").
+  // ── Framework zone: back-relations to framework-tier models. Sunrise never edits below here. ──
+
+  // ── App zone: back-relations to app-tier models. Sunrise never edits below here. ──
 
   @@unique([email])
   @@index([role])
